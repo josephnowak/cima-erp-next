@@ -281,6 +281,102 @@ class AdminOnlyEndpointTests(unittest.TestCase):
             self.assertIn("ya fue pagada", str(ctx.exception))
             self.assertEqual(fk.session.user, "seller@x.com")
 
+    def test_seller_settle_and_upload_case_insensitive(self) -> None:
+        from cima_ve.api import delivery_notes as dn
+
+        # Testing Camila's exact scenario: owner capitalized, seller lowercase, session either
+        fk = make_fake_frappe(["Sales User"], user="Marcanocamila2009@gmail.com")
+        inserted = []
+
+        class CamilaDoc:
+            name = "MAT-DN-2026-00001"
+            docstatus = 1
+            ve_vendedor_usuario = "marcanocamila2009@gmail.com"
+            owner = "Marcanocamila2009@gmail.com"
+            ve_vendedor_nombre = "Camila Marcano"
+            ve_ne_estado = "Pagada"
+            ve_ne_factura = "SINV-1"
+
+        class FakeFileDoc:
+            def __init__(self, payload):
+                self.name = "FILE-1"
+                self.file_url = "/private/files/comprobante.png"
+                self.file_name = payload["file_name"]
+                self.flags = types.SimpleNamespace(ignore_permissions=False)
+                self._payload = payload
+
+            def insert(self, ignore_permissions=False):
+                inserted.append(self._payload)
+
+        fk.get_doc = lambda arg1, arg2=None: FakeFileDoc(arg1) if isinstance(arg1, dict) and arg1.get("doctype") == "File" else CamilaDoc()
+
+        with patched_frappe(fk):
+            self.assertTrue(dn._can_user_settle_delivery_note(CamilaDoc(), "Marcanocamila2009@gmail.com"))
+            self.assertTrue(dn._can_user_settle_delivery_note(CamilaDoc(), "marcanocamila2009@gmail.com"))
+            res = dn.upload_delivery_note_payment_proof("MAT-DN-2026-00001", "comprobante.png", "aGVsbG8=")
+            self.assertEqual(res["file_url"], "/private/files/comprobante.png")
+            self.assertEqual(len(inserted), 1)
+
+    def test_cashier_caja_cima_can_settle_any_delivery_note(self) -> None:
+        from cima_ve.api import delivery_notes as dn
+
+        fk = make_fake_frappe(["Sales User", "Caja CIMA"], user="marcanocamila2009@gmail.com")
+        inserted = []
+
+        class OtherSellerDoc:
+            name = "MAT-DN-2026-00002"
+            docstatus = 1
+            ve_vendedor_usuario = "rey@cima.com"
+            owner = "rey@cima.com"
+            ve_vendedor_nombre = "Rey"
+            ve_ne_estado = "Pagada"
+            ve_ne_factura = "SINV-2"
+
+        class FakeFileDoc:
+            def __init__(self, payload):
+                self.name = "FILE-2"
+                self.file_url = "/private/files/caja_proof.png"
+                self.file_name = payload["file_name"]
+                self.flags = types.SimpleNamespace(ignore_permissions=False)
+                self._payload = payload
+
+            def insert(self, ignore_permissions=False):
+                inserted.append(self._payload)
+
+        fk.get_doc = lambda arg1, arg2=None: FakeFileDoc(arg1) if isinstance(arg1, dict) and arg1.get("doctype") == "File" else OtherSellerDoc()
+
+        with patched_frappe(fk):
+            self.assertTrue(dn._can_user_settle_delivery_note(OtherSellerDoc(), "marcanocamila2009@gmail.com"))
+            res = dn.upload_delivery_note_payment_proof("MAT-DN-2026-00002", "caja_proof.png", "aGVsbG8=")
+            self.assertEqual(res["file_url"], "/private/files/caja_proof.png")
+            self.assertEqual(len(inserted), 1)
+
+    def test_seller_can_settle_matching_by_fullname_or_sales_team(self) -> None:
+        from cima_ve.api import delivery_notes as dn
+
+        fk = make_fake_frappe(["Sales User"], user="marcanocamila2009@gmail.com")
+        fk.utils.get_fullname = lambda u: "Camila Marcano"
+
+        class DocWithNameOnly:
+            name = "MAT-DN-3"
+            docstatus = 1
+            ve_vendedor_usuario = ""
+            owner = "admin@x.com"
+            ve_vendedor_nombre = "Camila Marcano"
+            sales_team: list = []
+
+        class DocWithTeamOnly:
+            name = "MAT-DN-4"
+            docstatus = 1
+            ve_vendedor_usuario = ""
+            owner = "admin@x.com"
+            ve_vendedor_nombre = ""
+            sales_team = [types.SimpleNamespace(sales_person="Camila")]
+
+        with patched_frappe(fk):
+            self.assertTrue(dn._can_user_settle_delivery_note(DocWithNameOnly(), "marcanocamila2009@gmail.com"))
+            self.assertTrue(dn._can_user_settle_delivery_note(DocWithTeamOnly(), "marcanocamila2009@gmail.com"))
+
     def test_seller_cannot_read_admin_reports(self) -> None:
         from cima_ve.api import client_consumption, sales_metrics
 

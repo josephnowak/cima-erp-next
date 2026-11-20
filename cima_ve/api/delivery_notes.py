@@ -495,6 +495,8 @@ def get_delivery_notes(
         frappe.throw("Debes iniciar sesión para ver Notas de Entrega.", frappe.PermissionError)
 
     is_admin = "System Manager" in frappe.get_roles(current_user)
+    if not is_admin and (current_user == "Administrator" or bool(set(frappe.get_roles(current_user) or []) & {"Sales Manager", "Accounts Manager", "Caja CIMA"})):
+        is_admin = True
 
     dn_meta = frappe.get_meta("Delivery Note")
     has_estado = dn_meta.has_field("ve_ne_estado")
@@ -548,15 +550,15 @@ def get_delivery_notes(
         params["to_date"] = to_date
     if not is_admin:
         if has_vendedor_user:
-            conditions.append("COALESCE(NULLIF(dn.ve_vendedor_usuario, ''), dn.owner) = %(current_user)s")
+            conditions.append("LOWER(COALESCE(NULLIF(dn.ve_vendedor_usuario, ''), dn.owner)) = LOWER(%(current_user)s)")
         else:
-            conditions.append("dn.owner = %(current_user)s")
+            conditions.append("LOWER(dn.owner) = LOWER(%(current_user)s)")
         params["current_user"] = current_user
     elif seller:
         if has_vendedor_user:
-            conditions.append("COALESCE(NULLIF(dn.ve_vendedor_usuario, ''), dn.owner) = %(seller)s")
+            conditions.append("LOWER(COALESCE(NULLIF(dn.ve_vendedor_usuario, ''), dn.owner)) = LOWER(%(seller)s)")
         else:
-            conditions.append("dn.owner = %(seller)s")
+            conditions.append("LOWER(dn.owner) = LOWER(%(seller)s)")
         params["seller"] = seller
     if search:
         conditions.append("(dn.name LIKE %(q)s OR dn.customer LIKE %(q)s OR dn.customer_name LIKE %(q)s)")
@@ -1090,15 +1092,67 @@ def purge_cancelled_delivery_notes(include_orphan_sales_docs: bool = False) -> d
 
 
 def _can_user_settle_delivery_note(dn, user: str) -> bool:
-    """Admins pueden cobrar cualquier Nota de Entrega; los vendedores solo las suyas."""
+    """Admins y personal de caja pueden cobrar cualquier Nota de Entrega; los vendedores las suyas."""
     import frappe
 
     if not user or user == "Guest":
         return False
-    if user == "Administrator" or "System Manager" in frappe.get_roles(user):
+
+    roles = set(frappe.get_roles(user) or [])
+    admin_or_cashier_roles = {
+        "Administrator",
+        "System Manager",
+        "Sales Manager",
+        "Caja CIMA",
+        "Accounts Manager",
+        "Accounts User",
+    }
+    if user == "Administrator" or bool(roles & admin_or_cashier_roles):
         return True
-    seller_user = (getattr(dn, "ve_vendedor_usuario", None) or "").strip() or (getattr(dn, "owner", None) or "").strip()
-    return bool(seller_user and seller_user == user)
+
+    if not dn:
+        return False
+
+    if isinstance(dn, str):
+        dn = frappe.get_doc("Delivery Note", dn)
+
+    u = (user or "").strip().lower()
+
+    # 1. Comparación case-insensitive de usuario / email
+    seller_user = (getattr(dn, "ve_vendedor_usuario", None) or "").strip().lower()
+    if seller_user and seller_user == u:
+        return True
+
+    owner = (getattr(dn, "owner", None) or "").strip().lower()
+    if owner and owner == u:
+        return True
+
+    # 2. Comparación por nombre completo o primer nombre del usuario
+    seller_name = (getattr(dn, "ve_vendedor_nombre", None) or "").strip().lower()
+    user_fullname = (frappe.utils.get_fullname(user) if hasattr(frappe.utils, "get_fullname") else "").strip().lower()
+    if seller_name:
+        if user_fullname and (user_fullname == seller_name or seller_name in user_fullname or user_fullname in seller_name):
+            return True
+        user_prefix = u.split("@")[0].strip()
+        if user_prefix and len(user_prefix) >= 3 and (user_prefix in seller_name or seller_name in user_prefix):
+            return True
+
+    # 3. Comparación por equipo de ventas (sales_team)
+    for row in getattr(dn, "sales_team", []) or []:
+        sp = (getattr(row, "sales_person", "") or "").strip().lower()
+        if not sp:
+            continue
+        if sp == u:
+            return True
+        if user_fullname and (sp == user_fullname or sp in user_fullname or user_fullname in sp):
+            return True
+        if seller_name and (sp == seller_name or sp in seller_name or seller_name in sp):
+            return True
+        user_prefix = u.split("@")[0].strip()
+        if user_prefix and len(user_prefix) >= 3 and (sp == user_prefix or sp in user_prefix or user_prefix in sp):
+            return True
+
+    return False
 
 
 @whitelist()
@@ -1177,7 +1231,15 @@ def mark_delivery_note_paid(
     if not _can_user_settle_delivery_note(dn, current_user):
         frappe.throw("Solo puedes registrar pagos en tus propias Notas de Entrega.", frappe.PermissionError)
 
-    if current_user == "Administrator" or "System Manager" in frappe.get_roles(current_user):
+    admin_or_cashier_roles = {
+        "Administrator",
+        "System Manager",
+        "Sales Manager",
+        "Caja CIMA",
+        "Accounts Manager",
+        "Accounts User",
+    }
+    if current_user == "Administrator" or bool(set(frappe.get_roles(current_user) or []) & admin_or_cashier_roles):
         return _mark_delivery_note_paid_impl(
             dn=dn,
             resolved_by=current_user,
