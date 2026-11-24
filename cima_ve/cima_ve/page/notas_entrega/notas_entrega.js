@@ -12,6 +12,7 @@ class CimaNotasEntrega {
 		this.page = page;
 		this.wrapper = $(wrapper);
 		this.data = null;
+		this.notesRequest = 0;
 		this.filters = {
 			status: "",
 			from_date: "",
@@ -93,6 +94,7 @@ class CimaNotasEntrega {
 		root.on("click", "[data-action='calc-commission']", () => this.openCommissionCalculator());
 		root.on("click", "[data-action='go-clients']", () => frappe.set_route("clientes-consumo"));
 		root.on("click", "[data-action='refresh']", () => this.loadNotes());
+		root.on("click", "[data-notes-page]", (e) => this.loadNotes(Number(e.currentTarget.dataset.notesPage)));
 
 		root.on("change", "#ne-filter-status, #ne-filter-seller, #ne-filter-from, #ne-filter-to", () => {
 			this.filters.status = root.find("#ne-filter-status").val() || "";
@@ -113,8 +115,21 @@ class CimaNotasEntrega {
 
 		root.on("click", "[data-pay-client]", (e) => {
 			const cust = $(e.currentTarget).attr("data-pay-client");
-			const clientGroup = (this.data?.clients || []).find((c) => c.customer === cust);
-			if (clientGroup) this.openClientPaymentDialog(clientGroup);
+			const seller = this.filters.seller || "";
+			frappe.call({
+				method: "cima_ve.api.delivery_notes.get_client_payment_context",
+				args: { customer: cust, seller },
+				freeze: true,
+				freeze_message: "Cargando saldo del cliente...",
+				callback: (r) => {
+					if (Number(r.message?.pending_amount || 0) > 0.01) {
+						this.openClientPaymentDialog(r.message, seller);
+					} else {
+						frappe.msgprint("Este cliente no tiene Notas de Entrega pendientes por cobrar.");
+						this.loadNotes(1);
+					}
+				},
+			});
 		});
 
 		root.on("click", "[data-doc-client]", (e) => {
@@ -134,11 +149,16 @@ class CimaNotasEntrega {
 		});
 	}
 
-	loadNotes() {
+	loadNotes(page = 1) {
+		const request = ++this.notesRequest;
+		this.wrapper.find("#ne-clients-container").html(
+			`<div class="cima-ne-card text-center text-muted p-4" role="status">Cargando notas de entrega...</div>`
+		);
 		frappe.call({
 			method: "cima_ve.api.delivery_notes.get_delivery_notes",
-			args: this.filters,
+			args: { ...this.filters, page, page_size: 25 },
 			callback: (r) => {
+				if (request !== this.notesRequest) return;
 				if (!r.message) {
 					this.wrapper.find("#ne-clients-container").html(
 						`<div class="cima-ne-card text-center text-danger p-4">No se pudieron cargar las Notas de Entrega.</div>`
@@ -152,6 +172,7 @@ class CimaNotasEntrega {
 				this.renderTable();
 			},
 			error: () => {
+				if (request !== this.notesRequest) return;
 				this.wrapper.find("#ne-clients-container").html(
 					`<div class="cima-ne-card text-center text-danger p-4">Error al consultar Notas de Entrega. Verifica tu sesión o permisos.</div>`
 				);
@@ -240,6 +261,14 @@ class CimaNotasEntrega {
 
 		const fx = this.data?.config?.exchange_rate || {};
 		const fxRate = Number(fx.adjusted_rate || fx.bcv_rate || 0);
+		const renderProofLink = (url, seenProofs) => {
+			const href = String(url || "").trim();
+			const isLocalPath = href.startsWith("/") && !href.startsWith("//") && !href.includes("\\");
+			const isHttpUrl = /^https?:\/\/[^\\/?#\s]+(?:[/?#][^\s]*)?$/i.test(href);
+			if (!href || /[\u0000-\u001f\u007f]/.test(href) || (!isLocalPath && !isHttpUrl) || seenProofs.has(href)) return "";
+			seenProofs.add(href);
+			return ` · <a href="${frappe.utils.escape_html(href)}" target="_blank" rel="noopener noreferrer">📎 Ver captura</a>`;
+		};
 
 		const cardsHtml = clients
 			.map((client) => {
@@ -276,14 +305,14 @@ class CimaNotasEntrega {
 								? "cima-ne-badge-cancelada"
 								: "cima-ne-badge-pendiente";
 
+						const seenProofs = new Set();
+						const noteProofLink = renderProofLink(n.ve_ne_comprobante_url, seenProofs);
 						const history = Array.isArray(n.payment_history) ? n.payment_history : [];
 						const historyHtml = history.length
 							? `<div class="mt-1 pt-1" style="border-top:1px dashed #cbd5e1;">` +
 							  history
 									.map((h, idx) => {
-										const proofLink = h.screenshot_url
-											? ` · <a href="${encodeURI(h.screenshot_url)}" target="_blank" rel="noopener">📎 Ver captura</a>`
-											: "";
+										const proofLink = renderProofLink(h.screenshot_url, seenProofs);
 										const hBs = Number(h.amount_bs || 0) > 0 ? ` (${this.formatBs(h.amount_bs)})` : "";
 										return `<div class="text-muted" style="font-size:11px;">#${idx + 1}: <strong>$${Number(h.amount || 0).toFixed(2)}${hBs}</strong> · ${frappe.utils.escape_html(h.method || "")}${h.reference ? ` (Ref: ${frappe.utils.escape_html(h.reference)})` : ""}${proofLink}</div>`;
 									})
@@ -305,6 +334,7 @@ class CimaNotasEntrega {
 						} else if (n.ve_ne_estado === "Cancelada") {
 							resolutionHtml = `<div class="small text-danger"><strong>Cancelada</strong>${n.ve_ne_motivo_cancelacion ? `<br>${frappe.utils.escape_html(n.ve_ne_motivo_cancelacion)}` : ""}</div>`;
 						}
+						if (noteProofLink) resolutionHtml += `<div class="small">${noteProofLink}</div>`;
 
 						const canRevert = isAdmin && n.ve_ne_estado !== "Cancelada";
 						const actionsHtml = `
@@ -413,7 +443,14 @@ class CimaNotasEntrega {
 			})
 			.join("");
 
-		container.html(cardsHtml);
+		const { page = 1, pages = 1, total = 0 } = this.data?.pagination || {};
+		const pagination = pages > 1 ? `
+			<nav class="d-flex justify-content-center align-items-center flex-wrap mb-3" style="gap:10px;" aria-label="Páginas de Notas de Entrega">
+				<button type="button" class="btn btn-sm btn-default" data-notes-page="${page - 1}" ${page <= 1 ? "disabled" : ""}>Anterior</button>
+				<span class="text-muted" aria-live="polite">Página ${page} de ${pages} · ${total} notas</span>
+				<button type="button" class="btn btn-sm btn-default" data-notes-page="${page + 1}" ${page >= pages ? "disabled" : ""}>Siguiente</button>
+			</nav>` : "";
+		container.html(pagination + cardsHtml);
 	}
 
 	formatBs(amount) {
@@ -423,7 +460,7 @@ class CimaNotasEntrega {
 		})}`;
 	}
 
-	openClientPaymentDialog(client) {
+	openClientPaymentDialog(client, seller) {
 		const cfg = this.data?.config || {};
 		const fx = cfg.exchange_rate || {};
 		const fxRate = Number(fx.adjusted_rate || fx.bcv_rate || 0);
@@ -545,7 +582,7 @@ class CimaNotasEntrega {
 						apply_igtf: values.apply_igtf ? 1 : 0,
 						reference: isCash ? "" : values.reference || "",
 						screenshot_url: screenshotUrl,
-						seller: this.filters.seller || "",
+						seller,
 					},
 					freeze: true,
 					freeze_message: "Aplicando pago a Notas de Entrega más antiguas...",

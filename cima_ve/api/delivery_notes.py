@@ -236,6 +236,31 @@ def _post_whatsapp_webhook(webhook_url: str, token: str, payload_dict: dict) -> 
     return True
 
 
+def enqueue_delivery_note_created_notifications(delivery_note: str, extra_info: dict | None = None) -> None:
+    import frappe
+
+    def enqueue():
+        try:
+            frappe.enqueue(
+                "cima_ve.api.delivery_notes._run_delivery_note_created_notifications",
+                queue="default",
+                delivery_note=delivery_note,
+                extra_info=extra_info,
+            )
+        except Exception:
+            frappe.logger("cima_ve").exception("Could not queue notifications for Delivery Note %s", delivery_note)
+
+    frappe.db.after_commit.add(enqueue)
+
+
+def _run_delivery_note_created_notifications(delivery_note: str, extra_info: dict | None = None) -> None:
+    import frappe
+
+    doc = frappe.get_doc("Delivery Note", delivery_note)
+    if doc.docstatus == 1:
+        send_delivery_note_created_notifications(doc, extra_info=extra_info)
+
+
 def send_delivery_note_created_notifications(doc, extra_info: dict | None = None) -> dict:
     """Envía correo y WhatsApp con el PDF de la Nota de Entrega al cliente y a CIMA."""
     import base64
@@ -833,7 +858,7 @@ def create_quick_delivery_note(
     if doc.meta.has_field("ve_ne_comision_monto"):
         doc.db_set("ve_ne_comision_monto", comm_calc["commission_amount"], update_modified=False)
 
-    notif_result = send_delivery_note_created_notifications(doc)
+    enqueue_delivery_note_created_notifications(doc.name)
 
     return {
         "delivery_note": doc.name,
@@ -850,7 +875,7 @@ def create_quick_delivery_note(
             "option": comm_label,
             **comm_calc,
         },
-        "notifications": notif_result,
+        "notifications": {"scheduled": True},
         "seller": {
             "user": getattr(doc, "ve_vendedor_usuario", None) or effective_seller_user,
             "fullname": getattr(doc, "ve_vendedor_nombre", None) or seller_name,
@@ -866,8 +891,60 @@ def get_delivery_notes(
     to_date: str = "",
     seller: str = "",
     search: str = "",
+    page: int | None = None,
+    page_size: int = 25,
 ) -> dict:
     """Lista Notas de Entrega. Admin ve todas; otros usuarios solo ven las propias."""
+    return _get_delivery_notes(status, from_date, to_date, seller, search, page=page, page_size=page_size)
+
+
+def _get_delivery_note_items(names: list[str], *, cost_only: bool = False) -> dict[str, list[dict]]:
+    import frappe
+
+    if not names:
+        return {}
+    fields = ["parent", "item_code", "qty", "warehouse", "incoming_rate"]
+    if not cost_only:
+        fields += ["item_name", "price_list_rate", "rate", "discount_percentage", "discount_amount", "amount"]
+    items = frappe.get_all(
+        "Delivery Note Item",
+        filters={"parenttype": "Delivery Note", "parent": ["in", names]},
+        fields=fields,
+        order_by="parent asc, idx asc",
+    )
+    grouped: dict[str, list[dict]] = {}
+    for it in items:
+        if not cost_only:
+            orig_rate = float(it.get("price_list_rate") or 0)
+            final_rate = float(it.get("rate") or 0)
+            it["has_discount"] = bool(
+                float(it.get("discount_percentage") or 0) > 0
+                or float(it.get("discount_amount") or 0) > 0
+                or (orig_rate > 0 and final_rate < orig_rate - 0.0001)
+            )
+        grouped.setdefault(it["parent"], []).append(it)
+    return grouped
+
+
+def _set_delivery_note_items(note: dict, items: list[dict]) -> None:
+    note["items"] = items
+    note["discounted_items_count"] = sum(1 for it in items if it.get("has_discount"))
+    note["has_discount"] = bool(note["discounted_items_count"] or note.get("has_global_discount"))
+
+
+def _get_delivery_notes(
+    status: str = "",
+    from_date: str = "",
+    to_date: str = "",
+    seller: str = "",
+    search: str = "",
+    *,
+    page: int | None = None,
+    page_size: int = 25,
+    customer: str = "",
+    delivery_note: str = "",
+    include_items: bool = True,
+) -> dict:
     import frappe
 
     current_user = frappe.session.user
@@ -941,6 +1018,12 @@ def get_delivery_notes(
     if search:
         conditions.append("(dn.name LIKE %(q)s OR dn.customer LIKE %(q)s OR dn.customer_name LIKE %(q)s)")
         params["q"] = f"%{search.strip()}%"
+    if delivery_note:
+        conditions.append("dn.name = %(delivery_note)s")
+        params["delivery_note"] = delivery_note
+    elif customer:
+        conditions.append("dn.customer = %(customer)s")
+        params["customer"] = customer
 
     select_cols = [
         "dn.name",
@@ -1005,59 +1088,51 @@ def get_delivery_notes(
         SELECT {", ".join(select_cols)}
         FROM `tabDelivery Note` dn
         WHERE {" AND ".join(conditions)}
-        ORDER BY dn.creation DESC
-        LIMIT 300
+        ORDER BY dn.creation DESC, dn.name DESC
+        {"" if customer or delivery_note else "LIMIT 300"}
         """,
         params,
         as_dict=True,
     )
 
-    dn_names = [r["name"] for r in rows]
-    items_by_dn: dict[str, list[dict]] = {}
-    all_item_codes: list[str] = []
-    all_warehouses: list[str] = []
-    if dn_names:
-        dn_items = frappe.get_all(
-            "Delivery Note Item",
-            filters={"parent": ["in", dn_names]},
-            fields=[
-                "parent",
-                "item_code",
-                "item_name",
-                "qty",
-                "warehouse",
-                "incoming_rate",
-                "price_list_rate",
-                "rate",
-                "discount_percentage",
-                "discount_amount",
-                "amount",
-            ],
-            limit_page_length=3000,
-        )
-        for it in dn_items:
-            orig_rate = float(it.get("price_list_rate") or 0)
-            final_rate = float(it.get("rate") or 0)
-            disc_pct = float(it.get("discount_percentage") or 0)
-            disc_amt = float(it.get("discount_amount") or 0)
-            it["has_discount"] = bool(
-                disc_pct > 0 or disc_amt > 0 or (orig_rate > 0 and final_rate < orig_rate - 0.0001)
-            )
-            items_by_dn.setdefault(it["parent"], []).append(it)
-            if it.get("item_code"):
-                all_item_codes.append(it["item_code"])
-            if it.get("warehouse"):
-                all_warehouses.append(it["warehouse"])
-
+    items_by_dn = _get_delivery_note_items([r["name"] for r in rows]) if page is None and include_items else {}
     comm_enabled, comm_rules = _get_commission_config()
-    bin_costs, item_costs = _resolve_items_unit_costs(all_item_codes, all_warehouses)
+    fallback_rules = {}
+    if comm_enabled:
+        for r in rows:
+            if (
+                int(r.get("docstatus") or 0) == 2
+                or (r.get("ve_ne_estado") or "").strip() == "Cancelada"
+                or float(r.get("ve_ne_comision_pct") or 0.0) > 0
+                or is_non_commission_channel(r.get("ve_ne_origen"), r.get("canal_venta"), r.get("ve_ne_comision_opcion"))
+            ):
+                continue
+            rule = resolve_commission_rule(r.get("ve_ne_comision_opcion") or r.get("canal_venta") or "", comm_rules)
+            if rule:
+                fallback_rules[r["name"]] = rule
+
+    cost_items = (
+        items_by_dn if page is None and include_items
+        else _get_delivery_note_items(list(fallback_rules), cost_only=True)
+    )
+    missing_costs = [
+        it for name in fallback_rules for it in cost_items.get(name, [])
+        if float(it.get("incoming_rate") or 0) <= 0
+    ]
+    bin_costs, item_costs = _resolve_items_unit_costs(
+        [it["item_code"] for it in missing_costs if it.get("item_code")],
+        [it["warehouse"] for it in missing_costs if it.get("warehouse")],
+    )
+    seller_names = {}
 
     for r in rows:
-        r["items"] = items_by_dn.get(r["name"], [])
-        r["has_discount"] = any(it.get("has_discount") for it in r["items"])
-        r["discounted_items_count"] = sum(1 for it in r["items"] if it.get("has_discount"))
+        if page is None and include_items:
+            _set_delivery_note_items(r, items_by_dn.get(r["name"], []))
         if not r.get("seller_name") and r.get("seller_user"):
-            r["seller_name"] = frappe.utils.get_fullname(r["seller_user"]) or r["seller_user"]
+            user = r["seller_user"]
+            if user not in seller_names:
+                seller_names[user] = frappe.utils.get_fullname(user) or user
+            r["seller_name"] = seller_names[user]
 
         is_cancelled = int(r.get("docstatus") or 0) == 2 or (r.get("ve_ne_estado") or "") == "Cancelada"
         is_excluded_channel = is_non_commission_channel(
@@ -1072,13 +1147,10 @@ def get_delivery_notes(
             stored_pct = float(r.get("ve_ne_comision_pct") or 0.0)
             net_sale = float(r.get("net_total") or r.get("grand_total") or 0.0)
             if stored_pct <= 0.0:
-                rule = resolve_commission_rule(
-                    r.get("ve_ne_comision_opcion") or r.get("canal_venta") or "",
-                    comm_rules,
-                )
+                rule = fallback_rules.get(r["name"])
                 if rule:
                     calc_cost = _compute_dn_items_total_cost(
-                        r["items"],
+                        cost_items.get(r["name"], []),
                         bin_costs=bin_costs,
                         item_costs=item_costs,
                     )
@@ -1144,6 +1216,27 @@ def get_delivery_notes(
     summarized["commission_by_seller"] = summarize_seller_commissions(summarized["notes"], current_bs_rate=current_bs_rate)
     summarized["clients"] = summarize_client_delivery_notes(summarized["notes"])
 
+    if page is not None:
+        size = min(max(int(page_size), 1), 100)
+        total = len(summarized["notes"])
+        pages = max((total + size - 1) // size, 1)
+        current_page = min(max(int(page), 1), pages)
+        start = (current_page - 1) * size
+        ordered = [n for client in summarized["clients"] for n in client["notes"]]
+        visible = ordered[start : start + size]
+        visible_names = {n["name"] for n in visible}
+        visible_items = _get_delivery_note_items([n["name"] for n in visible])
+        for n in visible:
+            _set_delivery_note_items(n, visible_items.get(n["name"], []))
+        visible_clients = []
+        for client in summarized["clients"]:
+            client_notes = [n for n in client["notes"] if n["name"] in visible_names]
+            if client_notes:
+                visible_clients.append({**client, "notes": client_notes})
+        summarized["clients"] = visible_clients
+        summarized["notes"] = visible
+        summarized["pagination"] = {"page": current_page, "page_size": size, "total": total, "pages": pages}
+
     iva_rate, igtf_rate = _get_tax_rates()
     modes = frappe.get_all("Mode of Payment", filters={"enabled": 1}, pluck="name", order_by="name asc")
     payment_options = modes or ["Efectivo USD", "Efectivo Bs", "Contado USD", "Pago Móvil / Bs", "Cashea", "Punto de Venta", "Zelle", "Binance Pay", "Transferencia Bancaria"]
@@ -1154,7 +1247,7 @@ def get_delivery_notes(
     if is_admin:
         sellers = sorted({n.get("seller_user") for n in rows if n.get("seller_user")})
         seller_options = [
-            {"user": u, "fullname": frappe.utils.get_fullname(u) or u}
+            {"user": u, "fullname": seller_names.get(u) or frappe.utils.get_fullname(u) or u}
             for u in sellers
         ]
     else:
@@ -1593,6 +1686,34 @@ def mark_delivery_note_paid(
     )
 
 
+def _get_client_pending_notes(customer: str, seller: str = "") -> list[dict]:
+    return _get_delivery_notes(
+        status="Pendiente", customer=customer, seller=seller, include_items=False,
+    )["notes"]
+
+
+@whitelist()
+def get_client_payment_context(customer: str, seller: str = "") -> dict:
+    import frappe
+
+    customer = (customer or "").strip()
+    if not customer:
+        frappe.throw("Debes seleccionar un cliente.")
+    groups = summarize_client_delivery_notes(_get_client_pending_notes(customer, seller))
+    if not groups:
+        return {}
+    client = groups[0]
+    return {
+        "customer": client["customer"],
+        "customer_name": client["customer_name"],
+        "pending_amount": client["pending_amount"],
+        "notes": [
+            {key: n.get(key) for key in ("name", "posting_date", "ve_ne_estado", "remaining_amount")}
+            for n in client["notes"]
+        ],
+    }
+
+
 @whitelist()
 def register_client_payment(
     customer: str,
@@ -1616,14 +1737,7 @@ def register_client_payment(
         frappe.throw("Debes seleccionar un cliente.")
 
     is_admin = current_user == "Administrator" or "System Manager" in frappe.get_roles(current_user)
-    notes_data = get_delivery_notes(
-        status="Pendiente",
-        seller=seller if is_admin else "",
-    )
-    client_notes = [
-        n for n in (notes_data.get("notes") or [])
-        if str(n.get("customer") or "").strip() == clean_customer
-    ]
+    client_notes = _get_client_pending_notes(clean_customer, seller if is_admin else "")
 
     try:
         req_amt = float(paid_amount)
@@ -1708,7 +1822,7 @@ def get_delivery_note_document(
     if not dn_name and not cust_name:
         frappe.throw("Debes indicar una Nota de Entrega o un Cliente.")
 
-    data = get_delivery_notes()
+    data = _get_delivery_notes(delivery_note=dn_name, customer=cust_name)
     all_notes = data.get("notes") or []
 
     if dn_name:

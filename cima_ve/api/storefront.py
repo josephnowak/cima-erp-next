@@ -887,9 +887,9 @@ def _place_storefront_order_impl(
     price_mode: str = "detal",
 ) -> dict:
     import frappe
-    from cima_ve.api.delivery_notes import _get_auto_discount_config, send_delivery_note_created_notifications
+    from cima_ve.api.delivery_notes import _get_auto_discount_config, enqueue_delivery_note_created_notifications
     from cima_ve.api.seller_pos import _apply_required_sales_metadata
-    from cima_ve.services.delivery_note_service import compute_delivery_note_discounts
+    from cima_ve.services.delivery_note_service import DEFAULT_NOTIFICATION_WHATSAPP, compute_delivery_note_discounts
 
     parsed_items = json.loads(items) if isinstance(items, str) else items
     if not parsed_items:
@@ -1117,8 +1117,12 @@ def _place_storefront_order_impl(
 
     dn.add_comment("Comment", " | ".join(note_parts) + (f" | Comprobante: {screenshot_url}" if screenshot_url else ""))
 
-    notif_result = send_delivery_note_created_notifications(
-        dn,
+    whatsapp_url = build_whatsapp_link(
+        cfg["notify_whatsapp_number"] or DEFAULT_NOTIFICATION_WHATSAPP,
+        f"Hola CIMA Electronic VE, quisiera coordinar la entrega de mi pedido {dn.name}.",
+    )
+    enqueue_delivery_note_created_notifications(
+        dn.name,
         extra_info={
             "origin": "Tienda Web",
             "delivery_provider": provider["label"],
@@ -1143,5 +1147,5 @@ def _place_storefront_order_impl(
         "payment_method_label": method_label,
         "delivery_provider": provider,
         "status": "Nota de Entrega registrada (Pendiente de verificación)",
-        "notifications": notif_result,
+        "notifications": {"scheduled": True, "whatsapp_url": whatsapp_url},
     }

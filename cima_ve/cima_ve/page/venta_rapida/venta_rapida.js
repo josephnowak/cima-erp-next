@@ -43,11 +43,16 @@ class CimaSellerPortal {
 		};
 		this._pricingSeq = 0;
 		this._pricingTimer = null;
+		this._customerSeq = 0;
+		this._inventoryReady = false;
+		this._inventoryRequest = null;
+		this._inventoryCache = null;
 
 		this.renderShell();
 		this.bindEvents();
 		this.syncAdminVisibility();
 		this.loadBootstrap();
+		this.loadCustomers("");
 	}
 
 	isAdmin() {
@@ -265,7 +270,6 @@ class CimaSellerPortal {
 
 		root.on("click", "[data-action='tab-inventory']", () => {
 			this.switchTab("inventario");
-			this.loadInventory(root.find("#cima-inv-search").val() || "");
 		});
 
 		root.on("click", "[data-action='open-delivery-notes']", () => {
@@ -309,20 +313,10 @@ class CimaSellerPortal {
 			this.openNewCustomerDialog();
 		});
 
-		let itemSearchTimer = null;
-		root.on("input", "#cima-invoice-item-search", (e) => {
-			clearTimeout(itemSearchTimer);
-			itemSearchTimer = setTimeout(() => {
-				this.loadInventory($(e.target).val());
-			}, 220);
-		});
-
-		let invSearchTimer = null;
-		root.on("input", "#cima-inv-search", (e) => {
-			clearTimeout(invSearchTimer);
-			invSearchTimer = setTimeout(() => {
-				this.loadInventory($(e.target).val());
-			}, 220);
+		let inventorySearchTimer = null;
+		root.on("input", "#cima-invoice-item-search, #cima-inv-search", () => {
+			clearTimeout(inventorySearchTimer);
+			inventorySearchTimer = setTimeout(() => this.loadInventory(), 220);
 		});
 
 		let custSearchTimer = null;
@@ -345,11 +339,7 @@ class CimaSellerPortal {
 			this.state.priceList = $(e.target).val();
 			root.find("#cima-price-list").val(this.state.priceList);
 			root.find("#cima-inv-price-list").val(this.state.priceList);
-			this.loadInventory(
-				this.state.activeTab === "facturar"
-					? root.find("#cima-invoice-item-search").val()
-					: root.find("#cima-inv-search").val()
-			);
+			this.loadInventory();
 			this.refreshCartPricing();
 		});
 
@@ -357,11 +347,7 @@ class CimaSellerPortal {
 			this.state.warehouse = $(e.target).val();
 			root.find("#cima-warehouse").val(this.state.warehouse);
 			root.find("#cima-inv-warehouse").val(this.state.warehouse);
-			this.loadInventory(
-				this.state.activeTab === "facturar"
-					? root.find("#cima-invoice-item-search").val()
-					: root.find("#cima-inv-search").val()
-			);
+			this.loadInventory();
 			this.refreshCartPricing();
 		});
 
@@ -484,11 +470,13 @@ class CimaSellerPortal {
 	}
 
 	switchTab(tab) {
+		if (tab === this.state.activeTab) return;
 		this.state.activeTab = tab;
 		const showFacturar = tab === "facturar";
 		this.wrapper.find("#cima-view-facturar").toggle(showFacturar);
 		this.wrapper.find("#cima-view-inventario").toggle(!showFacturar);
 		this.wrapper.find("[data-action='tab-inventory']").toggleClass("active", !showFacturar);
+		this.loadInventory();
 	}
 
 	loadBootstrap() {
@@ -571,8 +559,8 @@ class CimaSellerPortal {
 					);
 				}
 
-				this.loadCustomers("");
-				this.loadInventory("");
+				this._inventoryReady = true;
+				this.loadInventory();
 				this.updateSummaryFromCart();
 			},
 		});
@@ -591,10 +579,12 @@ class CimaSellerPortal {
 	}
 
 	loadCustomers(query) {
+		const seq = ++this._customerSeq;
 		frappe.call({
 			method: "cima_ve.api.seller_pos.search_customers",
 			args: { query: query || "", limit: 25 },
 			callback: (r) => {
+				if (seq !== this._customerSeq) return;
 				const rows = r.message || [];
 				const options =
 					`<option value="">-- Seleccionar cliente --</option>` +
@@ -618,21 +608,56 @@ class CimaSellerPortal {
 		});
 	}
 
-	loadInventory(query) {
+	loadInventory(force = false) {
+		if (!this._inventoryReady) return;
+		const isInvoice = this.state.activeTab === "facturar";
+		const args = {
+			query: (this.wrapper.find(isInvoice ? "#cima-invoice-item-search" : "#cima-inv-search").val() || "").trim(),
+			price_list: this.state.priceList,
+			warehouse: this.state.warehouse,
+			limit: 80,
+		};
+		const key = JSON.stringify(args);
+		if (force) this._inventoryCache = null;
+		if (this._inventoryCache?.key === key && Date.now() - this._inventoryCache.time < 15000) {
+			this._inventoryRequest = null;
+			this.showInventory(this._inventoryCache.items);
+			return;
+		}
+		if (force || this._inventoryRequest?.key !== key || this._inventoryRequest.tab !== this.state.activeTab) {
+			this.state.inventoryItems = [];
+			this.wrapper.find(isInvoice ? "#cima-invoice-item-results" : "#cima-inv-table-body").html(
+				isInvoice ? `<div class="text-muted p-3">Cargando productos...</div>` : `<tr><td colspan="6" class="text-muted text-center">Cargando productos...</td></tr>`
+			);
+		}
+		if (!force && this._inventoryRequest?.key === key) {
+			this._inventoryRequest.tab = this.state.activeTab;
+			return;
+		}
+		const request = { key, tab: this.state.activeTab };
+		this._inventoryRequest = request;
 		frappe.call({
 			method: "cima_ve.api.seller_pos.search_inventory_and_prices",
-			args: {
-				query: query || "",
-				price_list: this.state.priceList,
-				warehouse: this.state.warehouse,
-				limit: 80,
-			},
+			args,
 			callback: (r) => {
-				this.state.inventoryItems = r.message || [];
-				this.renderInvoiceProductList();
-				this.renderInventoryTable();
+				if (this._inventoryRequest !== request) return;
+				this._inventoryRequest = null;
+				const items = r.message || [];
+				this._inventoryCache = { key, items, time: Date.now() };
+				this.showInventory(items);
+			},
+			error: () => {
+				if (this._inventoryRequest !== request) return;
+				this._inventoryRequest = null;
+				this.showInventory([]);
 			},
 		});
+	}
+
+	showInventory(items) {
+		this.state.inventoryItems = items;
+		if (this.state.activeTab === "facturar") this.renderInvoiceProductList();
+		else this.renderInventoryTable();
 	}
 
 	stockBadge(qty) {
@@ -1136,7 +1161,7 @@ class CimaSellerPortal {
 					this.wrapper.find("#cima-manual-discount-box").hide();
 					this.renderCart();
 					this.renderResultBanner();
-					this.loadInventory(this.wrapper.find("#cima-invoice-item-search").val() || "");
+					this.loadInventory(true);
 				}
 			},
 			error: () => {

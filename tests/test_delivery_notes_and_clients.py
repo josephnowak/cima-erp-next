@@ -1,6 +1,9 @@
 import json
 import pathlib
+import sys
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from cima_ve.services.client_consumption_service import compute_client_consumption
 from cima_ve.services.delivery_note_service import (
@@ -29,6 +32,98 @@ from cima_ve.services.delivery_note_service import (
 
 
 class DeliveryNotesAndClientConsumptionTests(unittest.TestCase):
+    def test_creation_notifications_are_deferred_until_commit(self) -> None:
+        from cima_ve.api import delivery_notes as api
+
+        doc = SimpleNamespace(name="DN-1", docstatus=1)
+        after_commit = Mock()
+        frappe = SimpleNamespace(
+            enqueue=Mock(), get_doc=Mock(return_value=doc), logger=Mock(),
+            db=SimpleNamespace(after_commit=after_commit),
+        )
+        extra = {"origin": "Tienda Web", "customer_email": "customer@example.com"}
+        with patch.dict(sys.modules, {"frappe": frappe}), \
+             patch.object(api, "send_delivery_note_created_notifications") as send:
+            api.enqueue_delivery_note_created_notifications(doc.name, extra)
+            frappe.enqueue.assert_not_called()
+            frappe.get_doc.assert_not_called()
+            send.assert_not_called()
+
+            after_commit.add.assert_called_once()
+            enqueue = after_commit.add.call_args.args[0]
+            enqueue()
+            frappe.enqueue.assert_called_once_with(
+                "cima_ve.api.delivery_notes._run_delivery_note_created_notifications",
+                queue="default", delivery_note="DN-1", extra_info=extra,
+            )
+            send.assert_not_called()
+
+            api._run_delivery_note_created_notifications(doc.name, extra)
+            frappe.get_doc.assert_called_once_with("Delivery Note", doc.name)
+            send.assert_called_once_with(doc, extra_info=extra)
+            send.reset_mock()
+            doc.docstatus = 2
+            api._run_delivery_note_created_notifications(doc.name, extra)
+            send.assert_not_called()
+
+            frappe.enqueue.side_effect = ConnectionError("Queue unavailable")
+            enqueue()
+            frappe.logger.return_value.exception.assert_called_once()
+            send.assert_not_called()
+
+    def test_paginated_notes_keep_totals_and_load_visible_items_only(self) -> None:
+        from cima_ve.api import delivery_notes as api
+
+        rows = [
+            {"name": "DN-3", "docstatus": 1, "ve_ne_estado": "Pagada", "grand_total": 40},
+            {"name": "DN-2", "docstatus": 1, "ve_ne_estado": "Pago Parcial", "grand_total": 100,
+             "ve_ne_monto_pagado": 40, "ve_ne_saldo_pendiente": 60, "ve_ne_comision_pct": 8,
+             "ve_ne_comision_monto": 8, "ve_ne_costo_total": 50},
+            {"name": "DN-1", "docstatus": 1, "grand_total": 50, "canal_venta": "Detal"},
+        ]
+        sql = Mock(side_effect=lambda *args, **kwargs: [
+            {**row, "customer": "CUST-1", "seller_user": "sales@example.com",
+             "posting_date": f"2026-01-0{row['name'][-1]}"} for row in rows
+        ])
+        frappe = SimpleNamespace(
+            db=SimpleNamespace(sql=sql), session=SimpleNamespace(user="sales@example.com"),
+            get_roles=lambda user: ["Sales User"], get_all=Mock(return_value=[]),
+            get_meta=lambda doctype: SimpleNamespace(has_field=lambda field: True),
+            utils=SimpleNamespace(get_fullname=lambda user: user),
+        )
+
+        def load_items(names, *, cost_only=False):
+            return {name: [{"qty": 1, "item_code": "X", "incoming_rate": 10,
+                            "has_discount": not cost_only}] for name in names}
+
+        with patch.dict(sys.modules, {"frappe": frappe}), \
+             patch.object(api, "_get_tax_rates", return_value=(16, 3)), \
+             patch.object(api, "_get_exchange_rate_snapshot", return_value={}), \
+             patch.object(api, "_get_commission_config", return_value=(True, DEFAULT_COMMISSION_RULES)), \
+             patch.object(api, "_get_delivery_note_items", side_effect=load_items) as items:
+            first = api.get_delivery_notes(status="Pendiente", page=1, page_size=1)
+            second = api.get_delivery_notes(status="Pendiente", page=9, page_size=1)
+            self.assertEqual([n["name"] for n in first["notes"]], ["DN-1"])
+            self.assertEqual([n["name"] for n in second["notes"]], ["DN-2"])
+            self.assertEqual(second["pagination"], {"page": 2, "page_size": 1, "total": 2, "pages": 2})
+            self.assertEqual(first["summary"], second["summary"])
+            self.assertEqual(second["summary"]["paid_total"], 80)
+            self.assertEqual(second["summary"]["filtered_commission"], 12)
+            self.assertEqual(second["summary"]["filtered_cost"], 60)
+            self.assertEqual(second["clients"][0]["pending_amount"], 110)
+            self.assertTrue(second["notes"][0]["has_discount"])
+            self.assertEqual(items.call_args_list[-2].args, (["DN-1"],))
+            self.assertEqual(items.call_args_list[-2].kwargs, {"cost_only": True})
+            items.assert_called_with(["DN-2"])
+
+            pending = api.get_client_payment_context("CUST-1", seller="ignored@example.com")
+            self.assertEqual(pending["pending_amount"], 110)
+            self.assertEqual([n["name"] for n in pending["notes"]], ["DN-1", "DN-2"])
+            query, params = sql.call_args.args
+            self.assertIn("dn.customer = %(customer)s", query)
+            self.assertIn("LOWER(%(current_user)s)", query)
+            self.assertEqual(params, {"customer": "CUST-1", "current_user": "sales@example.com"})
+
     def test_delivery_note_settlement_totals_iva_and_igtf(self) -> None:
         no_tax = compute_delivery_note_settlement_totals(100.0, apply_iva=False, apply_igtf=False)
         self.assertEqual(no_tax["iva_amount"], 0.0)
@@ -301,7 +396,7 @@ class DeliveryNotesAndClientConsumptionTests(unittest.TestCase):
 
         self.assertIn('"doctype": "Delivery Note"', sf_py)
         self.assertIn("upload_storefront_payment_proof", sf_py)
-        self.assertIn("send_delivery_note_created_notifications", sf_py)
+        self.assertIn("enqueue_delivery_note_created_notifications(", sf_py)
         self.assertIn("pay-screenshot", tienda_js)
         self.assertIn("upload_storefront_payment_proof", tienda_js)
         self.assertIn("ve_ne_comprobante_url", ne_js) if "ve_ne_comprobante_url" in ne_js else self.assertIn("screenshot_url", ne_js)
