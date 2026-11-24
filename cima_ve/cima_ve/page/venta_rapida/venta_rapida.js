@@ -19,6 +19,7 @@ class CimaSellerPortal {
 				warehouses: [],
 				sales_channels: [],
 				sales_persons: [],
+				seller_options: [],
 				default_price_list: "",
 				default_warehouse: "",
 				default_sales_channel: "Detal",
@@ -30,6 +31,8 @@ class CimaSellerPortal {
 			warehouse: "",
 			salesChannel: "Detal",
 			commissionOption: "",
+			selectedSellerUser: "",
+			selectedSalesPerson: "",
 			dueDate: "",
 			selectedCustomer: null,
 			manualDiscountEnabled: false,
@@ -141,6 +144,10 @@ class CimaSellerPortal {
 								</button>
 							</div>
 							<div id="cima-logged-seller-badge" class="text-muted small mb-2"></div>
+							<div id="cima-admin-seller-box" class="form-group mt-1 mb-2" data-admin-only="1" style="display: none;">
+								<label class="control-label" for="cima-seller-select">Vendedor asignado (Caja / Admin)</label>
+								<select id="cima-seller-select" class="form-control"></select>
+							</div>
 
 							<div id="cima-cart-items">
 								<div class="text-muted text-center p-4">
@@ -358,6 +365,19 @@ class CimaSellerPortal {
 			this.refreshCartPricing();
 		});
 
+		root.on("change", "#cima-seller-select", (e) => {
+			const sel = $(e.target);
+			const userVal = (sel.val() || "").trim();
+			const opt = sel.find("option:selected");
+			const spVal = (opt.attr("data-sales-person") || "").trim();
+			const fullVal = (opt.attr("data-fullname") || userVal).trim();
+			this.state.selectedSellerUser = userVal;
+			this.state.selectedSalesPerson = spVal;
+			this.wrapper.find("#cima-logged-seller-badge").html(
+				`Vendedor asignado: <strong>${frappe.utils.escape_html(fullVal)}</strong>`
+			);
+		});
+
 		root.on("change", "#cima-sales-channel", (e) => {
 			const selected = $(e.target).val() || "";
 			this.state.commissionOption = selected;
@@ -519,10 +539,37 @@ class CimaSellerPortal {
 				this.wrapper.find("#cima-warehouse, #cima-inv-warehouse").html(whOptions).val(this.state.warehouse);
 				this.wrapper.find("#cima-sales-channel").html(chOptions).val(this.state.commissionOption || this.state.salesChannel);
 
-				const sellerFull = r.message.current_user_fullname || frappe.session.user_fullname || frappe.session.user;
-				this.wrapper.find("#cima-logged-seller-badge").html(
-					`Vendedor: <strong>${frappe.utils.escape_html(sellerFull)}</strong>`
-				);
+				const sellerOptions = Array.isArray(r.message.seller_options) ? r.message.seller_options : [];
+				const currentUser = r.message.current_user || frappe.session.user || "";
+				const sellerFull = r.message.current_user_fullname || frappe.session.user_fullname || currentUser;
+				this.state.selectedSellerUser = currentUser;
+				this.state.selectedSalesPerson = r.message.default_sales_person || "";
+
+				if (this.isAdmin() && sellerOptions.length) {
+					const optsHtml = sellerOptions
+						.map((s) => {
+							const sUser = s.user || "";
+							const sFull = s.fullname || sUser;
+							const sSp = s.sales_person || "";
+							const isCurrent = sUser.toLowerCase() === currentUser.toLowerCase();
+							const spTag = sSp && sSp.toLowerCase() !== sFull.toLowerCase() ? ` · ${sSp}` : "";
+							const suffix = isCurrent ? " (Caja / Actual)" : spTag;
+							return `<option value="${frappe.utils.escape_html(sUser)}" data-sales-person="${frappe.utils.escape_html(sSp)}" data-fullname="${frappe.utils.escape_html(sFull)}">${frappe.utils.escape_html(sFull)}${frappe.utils.escape_html(suffix)}</option>`;
+						})
+						.join("");
+					this.wrapper.find("#cima-seller-select").html(optsHtml).val(currentUser);
+					this.wrapper.find("#cima-admin-seller-box").show();
+					const selOpt = this.wrapper.find("#cima-seller-select option:selected");
+					this.state.selectedSalesPerson = (selOpt.attr("data-sales-person") || r.message.default_sales_person || "").trim();
+					this.wrapper.find("#cima-logged-seller-badge").html(
+						`Vendedor asignado: <strong>${frappe.utils.escape_html(sellerFull)}</strong>`
+					);
+				} else {
+					this.wrapper.find("#cima-admin-seller-box").hide();
+					this.wrapper.find("#cima-logged-seller-badge").html(
+						`Vendedor: <strong>${frappe.utils.escape_html(sellerFull)}</strong>`
+					);
+				}
 
 				this.loadCustomers("");
 				this.loadInventory("");
@@ -1053,20 +1100,28 @@ class CimaSellerPortal {
 		const btn = this.wrapper.find("#cima-btn-emit");
 		btn.prop("disabled", true).text("Emitiendo Nota de Entrega...");
 
+		const submitArgs = {
+			customer: this.state.selectedCustomer,
+			customer_email: customerEmail,
+			items: JSON.stringify(this.state.cart),
+			price_list: this.state.priceList,
+			warehouse: this.state.warehouse,
+			sales_channel: this.state.salesChannel,
+			commission_option: this.state.commissionOption || this.state.salesChannel,
+			fecha_vencimiento: dueDate,
+			manual_discount_enabled: this.state.manualDiscountEnabled ? 1 : 0,
+			manual_discount_percentage: this.state.manualDiscountEnabled ? Number(this.state.manualDiscountPct || 0) : 0,
+		};
+		if (this.isAdmin() && this.state.selectedSellerUser) {
+			submitArgs.seller_user = this.state.selectedSellerUser;
+			if (this.state.selectedSalesPerson) {
+				submitArgs.sales_person = this.state.selectedSalesPerson;
+			}
+		}
+
 		frappe.call({
 			method: "cima_ve.api.delivery_notes.create_quick_delivery_note",
-			args: {
-				customer: this.state.selectedCustomer,
-				customer_email: customerEmail,
-				items: JSON.stringify(this.state.cart),
-				price_list: this.state.priceList,
-				warehouse: this.state.warehouse,
-				sales_channel: this.state.salesChannel,
-				commission_option: this.state.commissionOption || this.state.salesChannel,
-				fecha_vencimiento: dueDate,
-				manual_discount_enabled: this.state.manualDiscountEnabled ? 1 : 0,
-				manual_discount_percentage: this.state.manualDiscountEnabled ? Number(this.state.manualDiscountPct || 0) : 0,
-			},
+			args: submitArgs,
 			callback: (r) => {
 				btn.text("EMITIR NOTA DE ENTREGA");
 				if (r.message) {

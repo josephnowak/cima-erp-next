@@ -367,6 +367,64 @@ class AdminOnlyEndpointTests(unittest.TestCase):
             with self.assertRaises(FakePermissionError):
                 client_consumption.get_client_consumption()
 
+    def test_admin_can_assign_delivery_note_to_selected_seller(self) -> None:
+        from cima_ve.api import seller_pos
+
+        fk = make_fake_frappe(["System Manager"], user="cimaelectronic@gmail.com")
+        fk.utils.get_fullname = lambda u: {
+            "cimaelectronic@gmail.com": "Cima Electronic",
+            "marcanocamila2009@gmail.com": "Camila Marcano",
+        }.get(u, u)
+
+        class FakeMeta:
+            @staticmethod
+            def has_field(name: str) -> bool:
+                return name in {"usuario", "sales_team"}
+
+        fk.get_meta = lambda dt: FakeMeta()
+        fk.db = types.SimpleNamespace(
+            get_value=lambda dt, name, fields=None, as_dict=False: (
+                {"name": "marcanocamila2009@gmail.com", "enabled": 1, "full_name": "Camila Marcano"}
+                if dt == "User" and name == "marcanocamila2009@gmail.com"
+                else None
+            ),
+            exists=lambda dt, name: dt == "Sales Person" and name in {"Camila", "Daniela", "Tienda (Mostrador)"},
+        )
+        fk.get_all = lambda dt, **kw: (
+            [
+                {"name": "Camila", "employee": None, "usuario": "marcanocamila2009@gmail.com"},
+                {"name": "Daniela", "employee": None, "usuario": "valeria0205sz@gmail.com"},
+                {"name": "Tienda (Mostrador)", "employee": None, "usuario": None},
+            ]
+            if dt == "Sales Person"
+            else []
+        )
+
+        with patched_frappe(fk):
+            seller_user, seller_name, sales_person = seller_pos._resolve_effective_seller(
+                requested_seller_user="marcanocamila2009@gmail.com"
+            )
+
+        self.assertEqual(seller_user, "marcanocamila2009@gmail.com")
+        self.assertEqual(seller_name, "Camila Marcano")
+        self.assertEqual(sales_person, "Camila")
+
+    def test_non_admin_cannot_impersonate_another_seller(self) -> None:
+        from cima_ve.api import delivery_notes as dn
+
+        fk = make_fake_frappe(["Sales User"], user="valeria0205sz@gmail.com")
+        fk.utils.get_fullname = lambda u: "Daniela"
+
+        with patched_frappe(fk):
+            with self.assertRaises(FakePermissionError):
+                dn.create_quick_delivery_note(
+                    customer="Cliente Demo",
+                    items=[{"item_code": "TV-1", "qty": 1}],
+                    fecha_vencimiento="2026-12-01",
+                    customer_email="cliente@example.com",
+                    seller_user="marcanocamila2009@gmail.com",
+                )
+
 
 class CasheaAndFiscalPermissionTests(unittest.TestCase):
     def test_create_cashea_checkout_requires_doc_permission(self) -> None:

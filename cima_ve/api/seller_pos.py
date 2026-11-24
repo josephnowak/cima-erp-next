@@ -10,6 +10,224 @@ from cima_ve.services.seller_pos_service import (
 )
 
 
+def _is_admin_user(user: str) -> bool:
+    import frappe
+
+    clean = (user or "").strip()
+    if not clean or clean == "Guest":
+        return False
+    if clean == "Administrator":
+        return True
+    return "System Manager" in (frappe.get_roles(clean) or [])
+
+
+def _fetch_enabled_sales_persons() -> list[dict]:
+    import frappe
+
+    sp_fields = ["name", "employee"]
+    try:
+        sp_meta = frappe.get_meta("Sales Person")
+        if sp_meta and sp_meta.has_field("usuario"):
+            sp_fields.append("usuario")
+    except Exception:
+        pass
+    return (
+        frappe.get_all(
+            "Sales Person",
+            filters={"enabled": 1, "is_group": 0},
+            fields=sp_fields,
+            order_by="name asc",
+            limit_page_length=100,
+        )
+        or []
+    )
+
+
+def _match_sales_person_name(fullname: str, sales_persons: list[dict]) -> str:
+    clean_full = (fullname or "").strip().lower()
+    if not clean_full:
+        return ""
+    exact = next(
+        (sp["name"] for sp in sales_persons if (sp.get("name") or "").strip().lower() == clean_full),
+        "",
+    )
+    if exact:
+        return exact
+    first_token = clean_full.split()[0]
+    if len(first_token) >= 3:
+        return next(
+            (sp["name"] for sp in sales_persons if (sp.get("name") or "").strip().lower() == first_token),
+            "",
+        )
+    return ""
+
+
+def _resolve_sales_person_for_user(
+    target_user: str,
+    sales_person: str = "",
+    sales_persons: list[dict] | None = None,
+) -> str:
+    import frappe
+
+    chosen_sp = (sales_person or "").strip()
+    if chosen_sp and frappe.db.exists("Sales Person", chosen_sp):
+        return chosen_sp
+
+    sp_rows = sales_persons if sales_persons is not None else _fetch_enabled_sales_persons()
+    clean_user = (target_user or "").strip()
+    if clean_user:
+        chosen_sp = next(
+            (
+                sp["name"]
+                for sp in sp_rows
+                if (sp.get("usuario") or "").strip().lower() == clean_user.lower()
+            ),
+            "",
+        )
+        if not chosen_sp:
+            matched_emp = frappe.db.get_value("Employee", {"user_id": clean_user}, "name")
+            if matched_emp:
+                chosen_sp = next(
+                    (sp["name"] for sp in sp_rows if sp.get("employee") == matched_emp),
+                    "",
+                )
+        if not chosen_sp:
+            full_name = (frappe.utils.get_fullname(clean_user) or "").strip()
+            chosen_sp = _match_sales_person_name(full_name, sp_rows)
+
+    sp_names = [sp["name"] for sp in sp_rows]
+    if not chosen_sp:
+        chosen_sp = next(
+            (n for n in sp_names if "tienda" in n.lower() or "mostrador" in n.lower()),
+            sp_names[0] if sp_names else "",
+        )
+    if not chosen_sp:
+        any_sp = frappe.get_all("Sales Person", fields=["name"], limit_page_length=1)
+        chosen_sp = any_sp[0]["name"] if any_sp else ""
+    return chosen_sp
+
+
+def _get_selectable_sellers(current_user: str, sales_persons: list[dict]) -> list[dict]:
+    """Devuelve lista de usuarios vendedores seleccionables por administradores/caja."""
+    import frappe
+
+    excluded_users = {"Guest", "Administrator", "integration@api.com"}
+    sp_by_user: dict[str, str] = {}
+    sp_by_emp: dict[str, str] = {}
+    for sp in sales_persons or []:
+        sp_name = (sp.get("name") or "").strip()
+        if not sp_name:
+            continue
+        sp_user = (sp.get("usuario") or "").strip().lower()
+        if sp_user:
+            sp_by_user[sp_user] = sp_name
+        emp = (sp.get("employee") or "").strip()
+        if emp:
+            sp_by_emp[emp] = sp_name
+
+    if sp_by_emp:
+        for emp_row in (
+            frappe.get_all(
+                "Employee",
+                filters={"name": ["in", list(sp_by_emp.keys())]},
+                fields=["name", "user_id"],
+                limit_page_length=200,
+            )
+            or []
+        ):
+            uid = (emp_row.get("user_id") or "").strip().lower()
+            if uid and uid not in sp_by_user:
+                sp_by_user[uid] = sp_by_emp[emp_row["name"]]
+
+    users = (
+        frappe.get_all(
+            "User",
+            filters={"enabled": 1, "user_type": "System User"},
+            fields=["name", "full_name"],
+            order_by="full_name asc",
+            limit_page_length=100,
+        )
+        or []
+    )
+
+    def _build_entry(u_name: str, u_full: str) -> dict:
+        key = u_name.strip().lower()
+        full = (u_full or "").strip() or u_name
+        sp_name = sp_by_user.get(key, "") or _match_sales_person_name(full, sales_persons)
+        return {
+            "user": u_name,
+            "fullname": full,
+            "sales_person": sp_name,
+        }
+
+    options: list[dict] = []
+    seen: set[str] = set()
+    if current_user and current_user != "Guest":
+        cur_full = frappe.utils.get_fullname(current_user) or current_user
+        options.append(_build_entry(current_user, cur_full))
+        seen.add(current_user.strip().lower())
+
+    others: list[dict] = []
+    for row in users:
+        u_name = (row.get("name") or "").strip()
+        if not u_name or u_name in excluded_users:
+            continue
+        key = u_name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        others.append(_build_entry(u_name, row.get("full_name") or u_name))
+
+    others.sort(key=lambda item: (0 if item.get("sales_person") else 1, item["fullname"].lower()))
+    options.extend(others)
+    return options
+
+
+def _resolve_effective_seller(
+    requested_seller_user: str = "",
+    requested_sales_person: str = "",
+) -> tuple[str, str, str]:
+    """Resuelve (seller_user, seller_fullname, sales_person).
+
+    Solo Administrator / System Manager puede atribuir documentos a otro vendedor.
+    """
+    import frappe
+
+    current_user = (getattr(frappe.session, "user", None) or "").strip()
+    if not current_user or current_user == "Guest":
+        frappe.throw("Debes iniciar sesión para emitir una Nota de Entrega.", frappe.PermissionError)
+
+    req_user = (requested_seller_user or "").strip()
+    req_sp = (requested_sales_person or "").strip()
+    is_admin = _is_admin_user(current_user)
+
+    target_user = current_user
+    if req_user and req_user.lower() != current_user.lower():
+        if not is_admin:
+            frappe.throw(
+                "Solo un administrador puede emitir documentos a nombre de otro vendedor.",
+                frappe.PermissionError,
+            )
+        user_row = frappe.db.get_value(
+            "User",
+            req_user,
+            ["name", "enabled", "full_name"],
+            as_dict=True,
+        )
+        if not user_row or not int(user_row.get("enabled") or 0):
+            frappe.throw(f"El vendedor seleccionado ({req_user}) no existe o está deshabilitado.")
+        target_user = user_row["name"]
+        seller_name = (user_row.get("full_name") or "").strip() or frappe.utils.get_fullname(target_user) or target_user
+    else:
+        seller_name = frappe.utils.get_fullname(target_user) or target_user
+
+    if req_sp and not is_admin:
+        req_sp = ""
+
+    resolved_sp = _resolve_sales_person_for_user(target_user, sales_person=req_sp)
+    return target_user, seller_name, resolved_sp
+
+
 @whitelist()
 def get_seller_bootstrap() -> dict:
     """Devuelve configuración inicial para la interfaz simplificada de vendedores."""
@@ -45,32 +263,12 @@ def get_seller_bootstrap() -> dict:
 
     current_user = frappe.session.user
     current_user_fullname = frappe.utils.get_fullname(current_user) or current_user
+    is_admin = _is_admin_user(current_user)
 
-    sales_persons = frappe.get_all(
-        "Sales Person",
-        filters={"enabled": 1, "is_group": 0},
-        fields=["name", "employee"],
-        order_by="name asc",
-        limit_page_length=50,
-    )
+    sales_persons = _fetch_enabled_sales_persons()
     sales_person_names = [sp["name"] for sp in sales_persons]
-    matched_employee = frappe.db.get_value("Employee", {"user_id": current_user}, "name") if current_user else None
-    default_sales_person = ""
-    if matched_employee:
-        default_sales_person = next(
-            (sp["name"] for sp in sales_persons if sp.get("employee") == matched_employee),
-            "",
-        )
-    if not default_sales_person and current_user_fullname:
-        default_sales_person = next(
-            (name for name in sales_person_names if name.strip().lower() == current_user_fullname.strip().lower()),
-            "",
-        )
-    if not default_sales_person:
-        default_sales_person = next(
-            (name for name in sales_person_names if "tienda" in name.lower() or "mostrador" in name.lower()),
-            sales_person_names[0] if sales_person_names else "",
-        )
+    default_sales_person = _resolve_sales_person_for_user(current_user, sales_persons=sales_persons)
+    seller_options = _get_selectable_sellers(current_user, sales_persons) if is_admin else []
 
     sales_channels: list[str] = []
     si_meta = frappe.get_meta("Sales Invoice")
@@ -118,7 +316,8 @@ def get_seller_bootstrap() -> dict:
         "company": default_company,
         "current_user": current_user,
         "current_user_fullname": current_user_fullname,
-        "is_admin": "System Manager" in frappe.get_roles(current_user),
+        "is_admin": is_admin,
+        "seller_options": seller_options,
         "default_price_list": preferred_pl,
         "price_lists": price_lists,
         "warehouses": warehouses,
@@ -312,7 +511,12 @@ def _get_fiscal_rates() -> tuple[float, float]:
         return 16.0, 3.0
 
 
-def _apply_required_sales_metadata(doc, sales_channel: str = "", sales_person: str = "") -> None:
+def _apply_required_sales_metadata(
+    doc,
+    sales_channel: str = "",
+    sales_person: str = "",
+    seller_user: str = "",
+) -> None:
     """Completa campos personalizados/obligatorios (canal_venta, tipo_pedido, sales_team) si existen."""
     import frappe
 
@@ -334,41 +538,12 @@ def _apply_required_sales_metadata(doc, sales_channel: str = "", sales_person: s
         doc.set("tipo_pedido", chosen_type)
 
     if meta.has_field("sales_team") and not doc.get("sales_team"):
-        chosen_sp = (sales_person or "").strip()
-        if chosen_sp and not frappe.db.exists("Sales Person", chosen_sp):
-            chosen_sp = ""
-        if not chosen_sp:
-            sp_rows = frappe.get_all(
-                "Sales Person",
-                filters={"enabled": 1, "is_group": 0},
-                fields=["name", "employee"],
-                order_by="name asc",
-                limit_page_length=50,
-            )
-            current_user = getattr(frappe.session, "user", None) or ""
-            if current_user:
-                matched_emp = frappe.db.get_value("Employee", {"user_id": current_user}, "name")
-                if matched_emp:
-                    chosen_sp = next(
-                        (r["name"] for r in sp_rows if r.get("employee") == matched_emp),
-                        "",
-                    )
-                if not chosen_sp:
-                    full_name = (frappe.utils.get_fullname(current_user) or "").strip().lower()
-                    if full_name:
-                        chosen_sp = next(
-                            (r["name"] for r in sp_rows if r["name"].strip().lower() == full_name),
-                            "",
-                        )
-            sp_names = [r["name"] for r in sp_rows]
-            if not chosen_sp:
-                chosen_sp = next(
-                    (n for n in sp_names if "tienda" in n.lower() or "mostrador" in n.lower()),
-                    sp_names[0] if sp_names else "",
-                )
-        if not chosen_sp:
-            any_sp = frappe.get_all("Sales Person", fields=["name"], limit_page_length=1)
-            chosen_sp = any_sp[0]["name"] if any_sp else ""
+        effective_user = (
+            (seller_user or "").strip()
+            or (getattr(doc, "ve_vendedor_usuario", None) or "").strip()
+            or (getattr(frappe.session, "user", None) or "").strip()
+        )
+        chosen_sp = _resolve_sales_person_for_user(effective_user, sales_person=sales_person)
         if chosen_sp:
             doc.append("sales_team", {"sales_person": chosen_sp, "allocated_percentage": 100})
 
@@ -528,6 +703,7 @@ def create_quick_invoice(
     submit: int | bool = True,
     sales_channel: str = "Detal",
     sales_person: str = "",
+    seller_user: str = "",
 ) -> dict:
     """Crea y opcionalmente confirma una Sales Invoice desde la interfaz de vendedor."""
     import frappe
@@ -551,8 +727,10 @@ def create_quick_invoice(
             item_dict["warehouse"] = warehouse
         invoice_items.append(item_dict)
 
-    seller_user = frappe.session.user
-    seller_name = frappe.utils.get_fullname(seller_user) or seller_user
+    effective_seller_user, seller_name, resolved_sales_person = _resolve_effective_seller(
+        requested_seller_user=seller_user,
+        requested_sales_person=sales_person,
+    )
 
     doc = frappe.get_doc(
         {
@@ -563,13 +741,18 @@ def create_quick_invoice(
             "update_stock": 1 if warehouse else 0,
             "ignore_pricing_rule": 0,
             "ve_igtf_aplicado": 1 if apply_igtf_flag else 0,
-            "ve_vendedor_usuario": seller_user,
+            "ve_vendedor_usuario": effective_seller_user,
             "ve_vendedor_nombre": seller_name,
             "remarks": f"Factura rápida vendedor ({seller_name}) | Método: {payment_method}",
             "items": invoice_items,
         }
     )
-    _apply_required_sales_metadata(doc, sales_channel=sales_channel, sales_person=sales_person)
+    _apply_required_sales_metadata(
+        doc,
+        sales_channel=sales_channel,
+        sales_person=resolved_sales_person,
+        seller_user=effective_seller_user,
+    )
     doc.insert()
     if submit_flag:
         doc.submit()
@@ -601,7 +784,7 @@ def create_quick_invoice(
         "currency": doc.currency,
         "grand_total": float(doc.grand_total or summary.grand_total),
         "seller": {
-            "user": getattr(doc, "ve_vendedor_usuario", None) or seller_user,
+            "user": getattr(doc, "ve_vendedor_usuario", None) or effective_seller_user,
             "fullname": getattr(doc, "ve_vendedor_nombre", None) or seller_name,
         },
         "tax_summary": summary.to_dict(),

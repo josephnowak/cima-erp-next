@@ -615,10 +615,21 @@ def create_quick_delivery_note(
     commission_option: str = "",
     fecha_vencimiento: str = "",
     customer_email: str = "",
+    seller_user: str = "",
 ) -> dict:
     """Crea y confirma una Nota de Entrega (Delivery Note): descuenta inventario sin cobrar dinero aún."""
     import frappe
-    from cima_ve.api.seller_pos import _apply_required_sales_metadata, _resolve_company_and_currency
+    from cima_ve.api.seller_pos import (
+        _apply_required_sales_metadata,
+        _resolve_company_and_currency,
+        _resolve_effective_seller,
+    )
+
+    session_user = (getattr(frappe.session, "user", None) or "").strip()
+    effective_seller_user, seller_name, resolved_sales_person = _resolve_effective_seller(
+        requested_seller_user=seller_user,
+        requested_sales_person=sales_person,
+    )
 
     try:
         validated_due_date = validate_due_date(fecha_vencimiento)
@@ -661,10 +672,11 @@ def create_quick_delivery_note(
             item_dict["ignore_pricing_rule"] = 1
         dn_items.append(item_dict)
 
-    seller_user = frappe.session.user
-    if not seller_user or seller_user == "Guest":
-        frappe.throw("Debes iniciar sesión para emitir una Nota de Entrega.", frappe.PermissionError)
-    seller_name = frappe.utils.get_fullname(seller_user) or seller_user
+    default_remark = (
+        f"Nota de Entrega ({seller_name}, emitida por {session_user}) — Pendiente por cobrar"
+        if effective_seller_user.lower() != session_user.lower()
+        else f"Nota de Entrega ({seller_name}) — Pendiente por cobrar"
+    )
 
     doc = frappe.get_doc(
         {
@@ -675,13 +687,13 @@ def create_quick_delivery_note(
             "selling_price_list": price_list or None,
             "set_warehouse": warehouse or None,
             "ignore_pricing_rule": 0,
-            "ve_vendedor_usuario": seller_user,
+            "ve_vendedor_usuario": effective_seller_user,
             "ve_vendedor_nombre": seller_name,
             "ve_ne_estado": "Pendiente",
             "ve_ne_fecha_vencimiento": validated_due_date,
             "ve_ne_cliente_email": resolved_email,
             "ve_ne_cliente_telefono": resolved_phone,
-            "remarks": (notes or f"Nota de Entrega ({seller_name}) — Pendiente por cobrar").strip(),
+            "remarks": (notes or default_remark).strip(),
             "items": dn_items,
         }
     )
@@ -706,7 +718,12 @@ def create_quick_delivery_note(
             if doc.meta.has_field("ve_ne_origen"):
                 doc.ve_ne_origen = "Tienda Web"
 
-    _apply_required_sales_metadata(doc, sales_channel=effective_channel, sales_person=sales_person)
+    _apply_required_sales_metadata(
+        doc,
+        sales_channel=effective_channel,
+        sales_person=resolved_sales_person,
+        seller_user=effective_seller_user,
+    )
     doc.run_method("set_missing_values")
 
     if custom_price_map:
@@ -835,8 +852,9 @@ def create_quick_delivery_note(
         },
         "notifications": notif_result,
         "seller": {
-            "user": getattr(doc, "ve_vendedor_usuario", None) or seller_user,
+            "user": getattr(doc, "ve_vendedor_usuario", None) or effective_seller_user,
             "fullname": getattr(doc, "ve_vendedor_nombre", None) or seller_name,
+            "sales_person": resolved_sales_person,
         },
     }
 
@@ -1887,7 +1905,11 @@ def _mark_delivery_note_paid_impl(
                 )
 
         si.remarks = f"Liquidación Nota de Entrega {dn.name} | Método: {clean_method}" + (f" | Ref: {clean_reference}" if clean_reference else "")
-        _apply_required_sales_metadata(si, sales_channel=getattr(dn, "canal_venta", "Detal") or "Detal")
+        _apply_required_sales_metadata(
+            si,
+            sales_channel=getattr(dn, "canal_venta", "Detal") or "Detal",
+            seller_user=seller_user,
+        )
         si.flags.ignore_fiscal_stamp = True
         si.insert(ignore_permissions=True)
         si.submit()
