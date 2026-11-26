@@ -60,7 +60,7 @@
 .cima-cc-kpi-val {
 	font-size: 22px;
 	font-weight: 800;
-	color: var(--cima-dark, #1c2532);
+	color: var(--cima-heading, #1c2532);
 	margin-top: 4px;
 }
 
@@ -95,4 +95,18 @@
 	background: #fffbeb;
 	border-color: #fde68a;
 	color: #92400e;
+}
+
+[data-theme="dark"] .cima-seller-pill,
+[data-theme-mode="dark"] .cima-seller-pill {
+	background: rgba(0, 173, 164, 0.18);
+	border-color: rgba(94, 234, 212, 0.35);
+	color: #5eead4;
+}
+
+[data-theme="dark"] .cima-seller-pill-pending,
+[data-theme-mode="dark"] .cima-seller-pill-pending {
+	background: rgba(245, 158, 11, 0.2);
+	border-color: rgba(252, 211, 77, 0.35);
+	color: #fcd34d;
 }

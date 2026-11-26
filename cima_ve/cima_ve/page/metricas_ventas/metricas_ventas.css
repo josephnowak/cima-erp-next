@@ -81,7 +81,7 @@
 	font-size: 11px;
 	font-weight: 700;
 	text-transform: uppercase;
-	color: #64748b;
+	color: var(--cima-text-muted, #64748b);
 	margin: 0;
 }
 
@@ -92,9 +92,9 @@
 }
 
 .cima-preset-btn {
-	border: 1px solid #cbd5e1;
-	background: #f8fafc;
-	color: #334155;
+	border: 1px solid var(--cima-border, #cbd5e1);
+	background: var(--cima-surface-muted, #f8fafc);
+	color: var(--cima-text, #334155);
 	border-radius: 999px;
 	padding: 5px 12px;
 	font-size: 12px;
@@ -135,7 +135,7 @@
 .cima-kpi-value {
 	font-size: 24px;
 	font-weight: 800;
-	color: var(--cima-dark, #1c2532);
+	color: var(--cima-heading, #1c2532);
 	margin: 4px 0 2px;
 }
 
@@ -165,7 +165,7 @@
 .cima-metrics-card-title {
 	font-size: 16px;
 	font-weight: 700;
-	color: #0f172a;
+	color: var(--cima-heading, #0f172a);
 }
 
 .cima-metrics-grid-2 {
@@ -183,7 +183,7 @@
 .cima-share-bar-wrap {
 	width: 110px;
 	height: 8px;
-	background: #e2e8f0;
+	background: var(--cima-surface-muted, #e2e8f0);
 	border-radius: 999px;
 	overflow: hidden;
 	display: inline-block;
@@ -210,6 +210,11 @@
 	background: #e6f7f6 !important;
 }
 
+[data-theme="dark"] .cima-user-row.active-seller,
+[data-theme-mode="dark"] .cima-user-row.active-seller {
+	background: rgba(0, 173, 164, 0.22) !important;
+}
+
 .cima-trend-bars {
 	display: flex;
 	align-items: flex-end;
@@ -217,7 +222,7 @@
 	height: 160px;
 	padding: 12px 6px 4px;
 	overflow-x: auto;
-	border-bottom: 1px solid #e2e8f0;
+	border-bottom: 1px solid var(--cima-border, #e2e8f0);
 }
 
 .cima-trend-col {
@@ -245,7 +250,7 @@
 
 .cima-trend-date {
 	font-size: 10px;
-	color: #64748b;
+	color: var(--cima-text-muted, #64748b);
 	margin-top: 6px;
 	white-space: nowrap;
 }
@@ -271,4 +276,22 @@
 .cima-badge-info {
 	background: #e6f7f6;
 	color: #0f766e;
+}
+
+[data-theme="dark"] .cima-badge-ok,
+[data-theme-mode="dark"] .cima-badge-ok {
+	background: rgba(22, 163, 74, 0.22);
+	color: #86efac;
+}
+
+[data-theme="dark"] .cima-badge-warn,
+[data-theme-mode="dark"] .cima-badge-warn {
+	background: rgba(245, 158, 11, 0.22);
+	color: #fcd34d;
+}
+
+[data-theme="dark"] .cima-badge-info,
+[data-theme-mode="dark"] .cima-badge-info {
+	background: rgba(0, 173, 164, 0.22);
+	color: #5eead4;
 }

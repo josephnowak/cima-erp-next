@@ -60,7 +60,7 @@
 .cima-ne-kpi-val {
 	font-size: 22px;
 	font-weight: 800;
-	color: var(--cima-dark, #1c2532);
+	color: var(--cima-heading, #1c2532);
 	margin-top: 4px;
 }
 
@@ -112,6 +112,30 @@
 .cima-ne-badge-cancelada {
 	background: #fee2e2;
 	color: #991b1b;
+}
+
+[data-theme="dark"] .cima-ne-badge-pendiente,
+[data-theme-mode="dark"] .cima-ne-badge-pendiente {
+	background: rgba(245, 158, 11, 0.22);
+	color: #fcd34d;
+}
+
+[data-theme="dark"] .cima-ne-badge-parcial,
+[data-theme-mode="dark"] .cima-ne-badge-parcial {
+	background: rgba(0, 173, 164, 0.22);
+	color: #5eead4;
+}
+
+[data-theme="dark"] .cima-ne-badge-pagada,
+[data-theme-mode="dark"] .cima-ne-badge-pagada {
+	background: rgba(16, 185, 129, 0.22);
+	color: #6ee7b7;
+}
+
+[data-theme="dark"] .cima-ne-badge-cancelada,
+[data-theme-mode="dark"] .cima-ne-badge-cancelada {
+	background: rgba(239, 68, 68, 0.22);
+	color: #fca5a5;
 }
 
 .cima-ne-actions {

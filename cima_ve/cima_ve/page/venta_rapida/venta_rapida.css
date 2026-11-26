@@ -2,6 +2,7 @@
   max-width: 1280px;
   margin: 0 auto;
   padding: 16px 12px 40px;
+  color: var(--cima-text, var(--text-color, #1c2532));
 }
 
 .cima-hero-bar {
@@ -89,16 +90,18 @@
 }
 
 .cima-card {
-  background: var(--card-bg, #ffffff);
-  border: 1px solid var(--border-color, #e2e8f0);
+  background: var(--cima-surface, var(--card-bg, #ffffff));
+  border: 1px solid var(--cima-border, var(--border-color, #e2e8f0));
   border-radius: 12px;
   padding: 18px;
+  color: var(--cima-text, var(--text-color, #1c2532));
   box-shadow: 0 2px 8px rgba(15, 23, 42, 0.04);
 }
 
 .cima-card-title {
   font-size: 15px;
   font-weight: 700;
+  color: var(--cima-heading, var(--text-color, #1c2532));
   margin: 0 0 14px;
   display: flex;
   justify-content: space-between;
@@ -138,7 +141,7 @@
 }
 
 .cima-product-row:hover {
-  background: var(--bg-light-gray, #f8fafc);
+  background: var(--cima-surface-muted, var(--control-bg, #f8fafc));
 }
 
 .cima-stock-badge {
@@ -165,11 +168,27 @@
 }
 
 .cima-summary-box {
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
+  background: var(--cima-surface-muted, var(--control-bg, #f8fafc));
+  border: 1px solid var(--cima-border, var(--border-color, #e2e8f0));
+  color: var(--cima-text, var(--text-color, #1c2532));
   border-radius: 10px;
   padding: 14px;
   margin-top: 14px;
+}
+
+.cima-discount-toggle-box {
+  background: var(--cima-surface-muted, var(--control-bg, #f8fafc));
+  border: 1px solid var(--cima-border, var(--border-color, #e2e8f0));
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+
+.cima-discount-addon {
+  padding: 4px 10px;
+  background: var(--cima-surface-muted, var(--control-bg, #e2e8f0));
+  border: 1px solid var(--cima-border, var(--border-color, #cbd5e1));
+  border-left: 0;
+  color: var(--cima-text, var(--text-color, inherit));
 }
 
 .cima-summary-line {
@@ -185,7 +204,7 @@
   font-size: 18px;
   font-weight: 700;
   padding-top: 8px;
-  border-top: 1px solid #cbd5e1;
+  border-top: 1px solid var(--cima-border, var(--border-color, #cbd5e1));
   margin-top: 8px;
 }
 
@@ -213,6 +232,37 @@
   border-radius: 10px;
   padding: 16px;
   margin-bottom: 16px;
+  color: #064e3b;
+}
+
+[data-theme="dark"] .cima-result-banner,
+[data-theme-mode="dark"] .cima-result-banner {
+  background: rgba(16, 185, 129, 0.14);
+  border-color: #10b981;
+  color: #e6edf3;
+}
+
+[data-theme="dark"] .cima-result-banner a,
+[data-theme-mode="dark"] .cima-result-banner a {
+  color: #34d399;
+}
+
+[data-theme="dark"] .cima-stock-ok,
+[data-theme-mode="dark"] .cima-stock-ok {
+  background: rgba(22, 163, 74, 0.22);
+  color: #86efac;
+}
+
+[data-theme="dark"] .cima-stock-low,
+[data-theme-mode="dark"] .cima-stock-low {
+  background: rgba(234, 179, 8, 0.22);
+  color: #fde047;
+}
+
+[data-theme="dark"] .cima-stock-empty,
+[data-theme-mode="dark"] .cima-stock-empty {
+  background: rgba(239, 68, 68, 0.22);
+  color: #fca5a5;
 }
 
 .cima-qty-input {

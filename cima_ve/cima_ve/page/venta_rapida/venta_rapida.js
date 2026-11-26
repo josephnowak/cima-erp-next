@@ -170,7 +170,7 @@ class CimaSellerPortal {
 								<input type="date" id="cima-due-date" class="form-control" required />
 							</div>
 
-							<div class="form-group mt-2" style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:6px;padding:8px 10px;">
+							<div class="form-group mt-2 cima-discount-toggle-box">
 								<label class="d-flex align-items-center mb-0" style="gap:8px;cursor:pointer;font-weight:600;">
 									<input type="checkbox" id="cima-enable-discount" />
 									<span>Habilitar descuento (%)</span>
@@ -178,7 +178,7 @@ class CimaSellerPortal {
 								<div id="cima-manual-discount-box" style="display:none;margin-top:8px;">
 									<div class="input-group input-group-sm">
 										<input type="number" id="cima-discount-pct" class="form-control" min="0" max="100" step="0.01" placeholder="Ej: 10" value="0" />
-										<span class="input-group-addon" style="padding:4px 10px;background:#e2e8f0;border:1px solid #cbd5e1;border-left:0;">%</span>
+										<span class="input-group-addon cima-discount-addon">%</span>
 									</div>
 								</div>
 							</div>
@@ -965,13 +965,13 @@ class CimaSellerPortal {
 		const bsRate = this.getBsRate();
 		const totalBs = bsRate > 0 ? Number((d.finalTotal * bsRate).toFixed(2)) : 0;
 		const autoLine = d.autoAmount > 0
-			? `<div class="cima-summary-line" style="color:#92400e;"><span>Descuento automático (${d.autoPct}% · ${frappe.utils.escape_html(d.autoLabel)}):</span><strong>-${d.autoAmount.toFixed(2)}</strong></div>`
+			? `<div class="cima-summary-line cima-text-warn"><span>Descuento automático (${d.autoPct}% · ${frappe.utils.escape_html(d.autoLabel)}):</span><strong>-${d.autoAmount.toFixed(2)}</strong></div>`
 			: "";
 		const manualLine = d.manualAmount > 0
-			? `<div class="cima-summary-line" style="color:#92400e;"><span>Descuento manual (${d.manualPct}%):</span><strong>-${d.manualAmount.toFixed(2)}</strong></div>`
+			? `<div class="cima-summary-line cima-text-warn"><span>Descuento manual (${d.manualPct}%):</span><strong>-${d.manualAmount.toFixed(2)}</strong></div>`
 			: "";
 		const bsLine = bsRate > 0
-			? `<div class="cima-summary-line" style="color:#1d4ed8;font-weight:700;margin-top:4px;"><span>TOTAL (Bs.):</span><strong>${this.formatBs(totalBs)}</strong></div>
+			? `<div class="cima-summary-line cima-text-accent" style="font-weight:700;margin-top:4px;"><span>TOTAL (Bs.):</span><strong>${this.formatBs(totalBs)}</strong></div>
 			   <div class="small text-muted text-right">Tasa: Bs. ${bsRate.toFixed(2)} / USD</div>`
 			: "";
 		this.wrapper.find("#cima-tax-summary").html(`
@@ -1196,10 +1196,10 @@ class CimaSellerPortal {
 			globalDiscParts.push(`Manual ${Number(gi.manual_discount_pct).toFixed(2)}% (-$${Number(gi.manual_discount_amount).toFixed(2)})`);
 		}
 		const globalDiscLine = globalDiscParts.length
-			? `<div class="small mt-1" style="color:#92400e;"><strong>Descuento global en Nota de Entrega:</strong> ${frappe.utils.escape_html(globalDiscParts.join(" + "))}</div>`
+			? `<div class="small mt-1 cima-text-warn"><strong>Descuento global en Nota de Entrega:</strong> ${frappe.utils.escape_html(globalDiscParts.join(" + "))}</div>`
 			: "";
 		const discountLine = discItems.length
-			? `<div class="small mt-1" style="color:#92400e;"><strong>Descuentos por producto:</strong> ${discItems
+			? `<div class="small mt-1 cima-text-warn"><strong>Descuentos por producto:</strong> ${discItems
 					.map((d) => `${frappe.utils.escape_html(d.item_name || d.item_code)} ($${Number(d.price_list_rate).toFixed(2)} → $${Number(d.rate).toFixed(2)})`)
 					.join(", ")}</div>`
 			: "";
