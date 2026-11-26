@@ -352,6 +352,18 @@ class CimaBiPage {
 
 		const series = d.monthly_series || [];
 		const maxMonthUnits = Math.max(1, ...series.map((m) => Number(m.units_sold || 0)));
+		const sb = d.seasonal_buying || {};
+		const sbMonths = sb.months || [];
+		const maxSharePct = Math.max(1, ...sbMonths.map((m) => Number(m.sales_share_pct || 0)));
+		const seasonBadge =
+			sb.seasonality_type === "estacional"
+				? `<span class="cima-badge cima-badge-amber">Estacional (${Number(sb.peak_to_avg_ratio || 0).toFixed(1)}x pico)</span>`
+				: sb.seasonality_type === "constante"
+					? `<span class="cima-badge cima-badge-teal">Demanda Constante</span>`
+					: `<span class="cima-badge cima-badge-gray">Sin historial</span>`;
+		const buyNowBadge = sb.buy_now_recommended
+			? `<span class="cima-badge cima-badge-green ml-1">★ VENTANA ÓPTIMA ACTIVA</span>`
+			: "";
 
 		this.wrapper.find("#bi-product-detail").html(`
 			<div class="cima-bi-detail-box">
@@ -467,6 +479,79 @@ class CimaBiPage {
 								.join("")}
 						</div>
 					</div>
+				</div>
+
+				<div class="cima-bi-seasonal-card">
+					<div class="d-flex flex-wrap justify-content-between align-items-center mb-2" style="gap: 8px;">
+						<div>
+							<h5 class="font-weight-bold mb-0">
+								Distribución Anual y Ventana Óptima de Compra ${seasonBadge}${buyNowBadge}
+							</h5>
+							<div class="small text-muted">
+								Optimización para minimizar días en inventario considerando ${cfg.china_lead_time_days}d de tránsito desde China
+							</div>
+						</div>
+						<div class="small text-muted d-flex flex-wrap" style="gap: 12px;">
+							<span><span class="cima-bi-legend-dot" style="background: var(--cima-teal);"></span>% Ventas del Año</span>
+							<span><span class="cima-bi-legend-dot" style="background: #f59e0b;"></span>Índice de Compra</span>
+							<span><span class="cima-bi-legend-dot" style="background: #22c55e;"></span>Mes Óptimo de Compra</span>
+						</div>
+					</div>
+
+					${
+						sb.has_seasonal_data
+							? `
+								<div class="row mb-2" style="gap: 0;">
+									<div class="col-md-4 mb-2">
+										<div class="small text-muted">Mejor Período para Comprar</div>
+										<div style="font-weight: 800; font-size: 15px;">
+											${frappe.utils.escape_html(sb.optimal_buy_label || "-")}
+											${sb.next_optimal_order_date ? `<span class="small text-muted font-weight-normal">(Próx.: ${frappe.utils.escape_html(sb.next_optimal_order_date)})</span>` : ""}
+										</div>
+									</div>
+									<div class="col-md-4 mb-2">
+										<div class="small text-muted">Pico de Demanda</div>
+										<div style="font-weight: 800; font-size: 15px;">
+											${frappe.utils.escape_html(sb.peak_sales_label || "-")}
+										</div>
+									</div>
+									<div class="col-md-4 mb-2">
+										<div class="small text-muted">Tiempo Estimado en Inventario</div>
+										<div style="font-weight: 800; font-size: 15px;">
+											~${sb.min_holding_days ?? "-"}d óptimo
+											${sb.holding_days_saved > 0 ? `<span class="small cima-text-ok">(ahorra ${sb.holding_days_saved}d vs ${frappe.utils.escape_html(sb.worst_buy_label || "")})</span>` : ""}
+										</div>
+									</div>
+								</div>
+								<div class="small mb-2" style="padding: 8px 10px; border-radius: 8px; background: var(--cima-surface); border: 1px solid var(--cima-border);">
+									${frappe.utils.escape_html(sb.recommendation_text || "")}
+								</div>
+								<div class="cima-bi-seasonal-bars">
+									${sbMonths
+										.map((m) => {
+											const demandPct = m.sales_share_pct > 0 ? Math.max(5, Math.round((Number(m.sales_share_pct) / maxSharePct) * 100)) : 3;
+											const buyPct = Math.max(5, Math.round(Number(m.buy_score || 0)));
+											const optCls = m.is_optimal_buy ? " is-optimal" : "";
+											const topLabel = m.is_optimal_buy
+												? `★ ${Math.round(m.buy_score)}`
+												: `${Number(m.sales_share_pct || 0).toFixed(0)}%`;
+											const tip = `${m.full_name}: ${m.sales_share_pct}% ventas (${m.total_units} uds) · Índice compra: ${m.buy_score}/100 (~${m.est_holding_days}d en inventario)`;
+											return `
+												<div class="cima-bi-seasonal-col${optCls}" title="${frappe.utils.escape_html(tip)}">
+													<div class="cima-bi-seasonal-top">${topLabel}</div>
+													<div class="cima-bi-seasonal-pair">
+														<div class="cima-bi-bar-demand" style="height: ${demandPct}%;"></div>
+														<div class="cima-bi-bar-buy" style="height: ${buyPct}%;"></div>
+													</div>
+													<div class="cima-bi-month-label">${frappe.utils.escape_html(m.label)}</div>
+												</div>
+											`;
+										})
+										.join("")}
+								</div>
+							`
+							: `<div class="small text-muted">${frappe.utils.escape_html(sb.recommendation_text || "Sin datos históricos de ventas.")}</div>`
+					}
 				</div>
 
 				<div class="row">

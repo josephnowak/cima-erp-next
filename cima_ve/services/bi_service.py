@@ -236,6 +236,261 @@ def _shift_month(year: int, month: int, delta: int) -> tuple[int, int]:
     return total // 12, (total % 12) + 1
 
 
+_MONTH_LABELS_ES = [
+    "",
+    "Ene",
+    "Feb",
+    "Mar",
+    "Abr",
+    "May",
+    "Jun",
+    "Jul",
+    "Ago",
+    "Sep",
+    "Oct",
+    "Nov",
+    "Dic",
+]
+
+_MONTH_NAMES_ES = [
+    "",
+    "Enero",
+    "Febrero",
+    "Marzo",
+    "Abril",
+    "Mayo",
+    "Junio",
+    "Julio",
+    "Agosto",
+    "Septiembre",
+    "Octubre",
+    "Noviembre",
+    "Diciembre",
+]
+
+_DAYS_IN_MONTH = [0, 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+
+
+def compute_seasonal_buying_plan(
+    sales_entries: list[dict],
+    china_lead_time_days: int = 45,
+    safety_stock_days: int = 15,
+    today: date | None = None,
+) -> dict:
+    """
+    Optimiza la ventana de compra desde China minimizando el tiempo promedio
+    en inventario (días de almacenamiento) mientras cubre la demanda pico estacional.
+    """
+    ref_date = today or date.today()
+    lead_days = max(1, int(china_lead_time_days or 45))
+    safety_days = max(0, int(safety_stock_days or 15))
+
+    raw_units: dict[int, float] = {m: 0.0 for m in range(1, 13)}
+    raw_revenue: dict[int, float] = {m: 0.0 for m in range(1, 13)}
+    years_seen: dict[int, set[int]] = {m: set() for m in range(1, 13)}
+
+    for row in sales_entries or []:
+        pdate = _coerce_date(row.get("posting_date"))
+        if not pdate:
+            continue
+        qty = max(0.0, float(row.get("qty") or 0.0))
+        amount = max(0.0, float(row.get("amount") or 0.0))
+        m = pdate.month
+        raw_units[m] += qty
+        raw_revenue[m] += amount
+        if qty > 0:
+            years_seen[m].add(pdate.year)
+
+    norm_units = {
+        m: (raw_units[m] / len(years_seen[m])) if years_seen[m] else 0.0
+        for m in range(1, 13)
+    }
+    total_norm = sum(norm_units.values())
+
+    if total_norm <= 0:
+        empty_months = [
+            {
+                "month": m,
+                "label": _MONTH_LABELS_ES[m],
+                "full_name": _MONTH_NAMES_ES[m],
+                "avg_units": 0.0,
+                "total_units": 0.0,
+                "total_revenue": 0.0,
+                "sales_share_pct": 0.0,
+                "buy_score": 0.0,
+                "est_holding_days": None,
+                "is_peak_sales": False,
+                "is_optimal_buy": False,
+            }
+            for m in range(1, 13)
+        ]
+        return {
+            "has_seasonal_data": False,
+            "seasonality_type": "sin_datos",
+            "seasonality_label": "Sin historial de ventas",
+            "peak_to_avg_ratio": 0.0,
+            "peak_sales_months": [],
+            "peak_sales_label": "Sin datos",
+            "optimal_buy_months": [],
+            "optimal_buy_label": "Sin datos",
+            "next_optimal_order_date": None,
+            "buy_now_recommended": False,
+            "min_holding_days": None,
+            "worst_holding_days": None,
+            "worst_buy_label": None,
+            "holding_days_saved": None,
+            "recommendation_text": "Aún no hay suficientes ventas facturadas para calcular la estacionalidad de compra.",
+            "months": empty_months,
+        }
+
+    shares = {m: norm_units[m] / total_norm for m in range(1, 13)}
+    daily_share = {m: shares[m] / _DAYS_IN_MONTH[m] for m in range(1, 13)}
+
+    # Identify peak 2-month contiguous window (wrapping Dec -> Jan) to size seasonal batch B
+    best_2m_sum = 0.0
+    for m in range(1, 13):
+        m2 = (m % 12) + 1
+        s2 = shares[m] + shares[m2]
+        if s2 > best_2m_sum:
+            best_2m_sum = s2
+
+    # Batch size B to cover the seasonal peak (bounded between 25% and 95% of annual demand)
+    batch_share = min(0.95, max(0.25, best_2m_sum))
+
+    def _simulate_holding_days(order_month: int, order_day: int) -> float:
+        # Reference non-leap year 2025 for cyclic 365-day simulation
+        order_dt = date(2025, order_month, order_day)
+        arrival_dt = order_dt + timedelta(days=lead_days)
+        remaining = batch_share
+        total_unit_days = 0.0
+        for t in range(365):
+            cur_dt = arrival_dt + timedelta(days=t)
+            d_rate = daily_share[cur_dt.month]
+            sold_today = min(remaining, d_rate)
+            total_unit_days += sold_today * t
+            remaining -= sold_today
+            if remaining <= 1e-9:
+                break
+        if remaining > 1e-9:
+            total_unit_days += remaining * 365.0
+        return total_unit_days / batch_share
+
+    # Evaluate both start-of-month (day 1) and mid-month (day 15) for precision
+    candidate_results: list[tuple[int, int, float]] = []
+    month_best_hold: dict[int, float] = {}
+    for m in range(1, 13):
+        h1 = _simulate_holding_days(m, 1)
+        h15 = _simulate_holding_days(m, 15)
+        candidate_results.append((m, 1, h1))
+        candidate_results.append((m, 15, h15))
+        month_best_hold[m] = min(h1, h15)
+
+    min_hold = min(month_best_hold.values())
+    max_hold = max(month_best_hold.values())
+    worst_month = max(month_best_hold, key=lambda m: month_best_hold[m])
+
+    max_share = max(shares.values())
+    peak_to_avg = round(max_share / (1.0 / 12.0), 2)
+    is_seasonal = peak_to_avg >= 1.5 and (max_hold - min_hold) >= 10.0
+
+    # Peak sales months: months >= 40% of peak month's share and >= 1.5x average (12.5%)
+    peak_threshold = max(max_share * 0.40, 1.5 / 12.0)
+    peak_months = [m for m in range(1, 13) if shares[m] >= peak_threshold and shares[m] > 0]
+    if not peak_months:
+        peak_months = [max(shares, key=lambda m: shares[m])]
+
+    # Buy score per month: higher when avg_holding_days is close to min_hold
+    buy_scores: dict[int, float] = {}
+    for m in range(1, 13):
+        h = month_best_hold[m]
+        if h <= 0:
+            buy_scores[m] = 100.0
+        elif not is_seasonal:
+            buy_scores[m] = round(max(70.0, min(100.0, (min_hold / h) * 100.0)), 1)
+        else:
+            buy_scores[m] = round(max(5.0, min(100.0, (min_hold / h) * 100.0)), 1)
+
+    optimal_buy_months = [m for m in range(1, 13) if buy_scores[m] >= 80.0] if is_seasonal else []
+    if is_seasonal and not optimal_buy_months:
+        best_m = min(month_best_hold, key=lambda m: month_best_hold[m])
+        optimal_buy_months = [best_m]
+
+    best_cand_m, best_cand_day, _ = min(candidate_results, key=lambda x: x[2])
+    if is_seasonal:
+        candidate_dt = date(ref_date.year, best_cand_m, best_cand_day)
+        if candidate_dt < ref_date - timedelta(days=15):
+            candidate_dt = date(ref_date.year + 1, best_cand_m, best_cand_day)
+        next_optimal_order_date = candidate_dt.isoformat()
+        buy_now = ref_date.month in optimal_buy_months
+    else:
+        next_optimal_order_date = None
+        buy_now = False
+
+    peak_sales_label = ", ".join(_MONTH_LABELS_ES[m] for m in peak_months)
+    optimal_buy_label = (
+        ", ".join(_MONTH_LABELS_ES[m] for m in optimal_buy_months)
+        if optimal_buy_months
+        else "Todo el año (demanda constante)"
+    )
+    holding_saved = round(max_hold - min_hold, 1)
+
+    if is_seasonal:
+        if buy_now:
+            rec_text = (
+                f"Ventana óptima ACTIVA ({optimal_buy_label}). Comprar ahora minimiza el inventario a ~{round(min_hold)} días "
+                f"para cubrir el pico de {peak_sales_label} (llegada en {lead_days}d). "
+                f"Comprar en {_MONTH_NAMES_ES[worst_month]} retendría el stock ~{round(max_hold)} días."
+            )
+        else:
+            rec_text = (
+                f"Mejor período de compra: {optimal_buy_label} (próxima orden ideal: {next_optimal_order_date}). "
+                f"Con {lead_days}d de tránsito desde China, llega justo antes del pico ({peak_sales_label}) "
+                f"con ~{round(min_hold)}d en inventario vs ~{round(max_hold)}d si se compra en {_MONTH_NAMES_ES[worst_month]}."
+            )
+    else:
+        rec_text = (
+            f"Demanda distribuida de forma estable todo el año (pico leve en {peak_sales_label}). "
+            f"Reponer de forma continua según punto de reorden ({lead_days}d China + {safety_days}d seguridad)."
+        )
+
+    months_out = []
+    for m in range(1, 13):
+        months_out.append(
+            {
+                "month": m,
+                "label": _MONTH_LABELS_ES[m],
+                "full_name": _MONTH_NAMES_ES[m],
+                "avg_units": round(norm_units[m], 2),
+                "total_units": round(raw_units[m], 2),
+                "total_revenue": round(raw_revenue[m], 2),
+                "sales_share_pct": round(shares[m] * 100.0, 1),
+                "buy_score": buy_scores[m],
+                "est_holding_days": round(month_best_hold[m], 1),
+                "is_peak_sales": m in peak_months,
+                "is_optimal_buy": m in optimal_buy_months,
+            }
+        )
+
+    return {
+        "has_seasonal_data": True,
+        "seasonality_type": "estacional" if is_seasonal else "constante",
+        "seasonality_label": "Demanda Estacional" if is_seasonal else "Demanda Constante",
+        "peak_to_avg_ratio": peak_to_avg,
+        "peak_sales_months": peak_months,
+        "peak_sales_label": peak_sales_label,
+        "optimal_buy_months": optimal_buy_months,
+        "optimal_buy_label": optimal_buy_label,
+        "next_optimal_order_date": next_optimal_order_date,
+        "buy_now_recommended": buy_now,
+        "min_holding_days": round(min_hold, 1),
+        "worst_holding_days": round(max_hold, 1),
+        "worst_buy_label": _MONTH_NAMES_ES[worst_month],
+        "holding_days_saved": holding_saved,
+        "recommendation_text": rec_text,
+        "months": months_out,
+    }
+
+
 def build_product_analytics(
     item: dict,
     sales_entries: list[dict],
@@ -414,6 +669,13 @@ def build_product_analytics(
         if float(w.get("actual_qty") or 0.0) != 0 or float(w.get("ordered_qty") or 0.0) != 0
     ]
 
+    seasonal_buying = compute_seasonal_buying_plan(
+        sales_entries=sales_entries,
+        china_lead_time_days=lead_days,
+        safety_stock_days=safety_days,
+        today=ref_date,
+    )
+
     return {
         "config": {
             "china_lead_time_days": lead_days,
@@ -486,6 +748,7 @@ def build_product_analytics(
             "projected_profit_90d": round(proj_90d * margin_per_unit, 2),
         },
         "monthly_series": monthly_series,
+        "seasonal_buying": seasonal_buying,
         "warehouse_breakdown": warehouses,
         "recent_sales": recent_sales,
     }

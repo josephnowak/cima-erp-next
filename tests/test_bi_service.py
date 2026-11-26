@@ -6,6 +6,7 @@ from cima_ve.services.bi_service import (
     analyze_inventory_intelligence,
     build_product_analytics,
     build_weekly_stockout_email_html,
+    compute_seasonal_buying_plan,
 )
 
 
@@ -199,6 +200,56 @@ class BiServiceTests(unittest.TestCase):
         self.assertEqual(res_90["sales_summary"]["units_window"], 90.0)
         self.assertEqual(res_90["sales_summary"]["revenue_window"], 1350.0)
         self.assertEqual(res_90["velocity_and_trend"]["daily_velocity"], 1.0)
+
+    def test_compute_seasonal_buying_plan_toys_december_peak(self) -> None:
+        # Toys: 30% in Nov, 60% in Dec, 1% each in Jan-Oct; 30-day lead time -> best buy is October
+        sales = [{"posting_date": f"2025-{m:02d}-15", "qty": 1, "amount": 10.0} for m in range(1, 11)]
+        sales.append({"posting_date": "2025-11-15", "qty": 30, "amount": 300.0})
+        sales.append({"posting_date": "2025-12-15", "qty": 60, "amount": 600.0})
+
+        plan_oct = compute_seasonal_buying_plan(
+            sales_entries=sales,
+            china_lead_time_days=30,
+            safety_stock_days=15,
+            today=date(2026, 10, 5),
+        )
+        self.assertTrue(plan_oct["has_seasonal_data"])
+        self.assertEqual(plan_oct["seasonality_type"], "estacional")
+        self.assertIn(11, plan_oct["peak_sales_months"])
+        self.assertIn(12, plan_oct["peak_sales_months"])
+        self.assertIn(10, plan_oct["optimal_buy_months"])
+        self.assertTrue(plan_oct["buy_now_recommended"])
+        self.assertLess(plan_oct["min_holding_days"], 60.0)
+        self.assertGreater(plan_oct["worst_holding_days"], 200.0)
+        self.assertEqual(len(plan_oct["months"]), 12)
+
+        feb_entry = plan_oct["months"][1]
+        oct_entry = plan_oct["months"][9]
+        self.assertLess(oct_entry["est_holding_days"], feb_entry["est_holding_days"])
+        self.assertGreater(oct_entry["buy_score"], feb_entry["buy_score"])
+
+        # Same product checked in February should NOT recommend buying now
+        plan_feb = compute_seasonal_buying_plan(
+            sales_entries=sales,
+            china_lead_time_days=30,
+            safety_stock_days=15,
+            today=date(2026, 2, 10),
+        )
+        self.assertFalse(plan_feb["buy_now_recommended"])
+        self.assertTrue(plan_feb["next_optimal_order_date"].startswith("2026-10-"))
+
+    def test_compute_seasonal_buying_plan_constant_and_empty(self) -> None:
+        constant_sales = [{"posting_date": f"2025-{m:02d}-10", "qty": 10, "amount": 100.0} for m in range(1, 13)]
+        plan_const = compute_seasonal_buying_plan(constant_sales, china_lead_time_days=45, today=date(2026, 5, 1))
+        self.assertTrue(plan_const["has_seasonal_data"])
+        self.assertEqual(plan_const["seasonality_type"], "constante")
+        self.assertEqual(plan_const["optimal_buy_months"], [])
+        self.assertIsNone(plan_const["next_optimal_order_date"])
+
+        plan_empty = compute_seasonal_buying_plan([], china_lead_time_days=45, today=date(2026, 5, 1))
+        self.assertFalse(plan_empty["has_seasonal_data"])
+        self.assertEqual(plan_empty["seasonality_type"], "sin_datos")
+        self.assertEqual(len(plan_empty["months"]), 12)
 
 
 if __name__ == "__main__":

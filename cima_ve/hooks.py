@@ -8,7 +8,7 @@ app_license = "MIT"
 app_include_js = ["/assets/cima_ve/js/seller_shell.js?v=10"]
 app_include_css = [
     "/assets/cima_ve/css/seller_shell.css?v=10",
-    "/assets/cima_ve/css/cima_brand.css?v=11",
+    "/assets/cima_ve/css/cima_brand.css?v=12",
 ]
 
 role_home_page = {
