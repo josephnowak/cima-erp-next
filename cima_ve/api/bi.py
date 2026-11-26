@@ -10,13 +10,24 @@ from cima_ve.services.bi_service import (
 )
 
 
-def compute_bi_snapshot() -> dict:
+def _resolve_window_days(settings, analysis_window_days: int | str | None = None) -> int:
+    if analysis_window_days is not None and str(analysis_window_days).strip() != "":
+        try:
+            days = int(analysis_window_days)
+            if 1 <= days <= 730:
+                return days
+        except (TypeError, ValueError):
+            pass
+    return int(getattr(settings, "bi_analysis_window_days", 90) or 90)
+
+
+def compute_bi_snapshot(analysis_window_days: int | str | None = None) -> dict:
     import frappe
 
     settings = frappe.get_single("Cima VE Settings")
     lead_days = int(getattr(settings, "china_lead_time_days", 45) or 45)
     safety_days = int(getattr(settings, "bi_safety_stock_days", 15) or 15)
-    window_days = int(getattr(settings, "bi_analysis_window_days", 90) or 90)
+    window_days = _resolve_window_days(settings, analysis_window_days)
 
     since_date = (date.today() - timedelta(days=window_days)).isoformat()
 
@@ -65,9 +76,9 @@ def compute_bi_snapshot() -> dict:
 
 
 @whitelist()
-def get_bi_dashboard() -> dict:
+def get_bi_dashboard(analysis_window_days: int | str | None = None) -> dict:
     """Devuelve el análisis completo de Business Intelligence e importación desde China."""
-    return compute_bi_snapshot()
+    return compute_bi_snapshot(analysis_window_days=analysis_window_days)
 
 
 @whitelist()
@@ -96,7 +107,7 @@ def send_bi_stockout_alert_now() -> dict:
 
 
 @whitelist()
-def get_product_bi_analytics(item_code: str) -> dict:
+def get_product_bi_analytics(item_code: str, analysis_window_days: int | str | None = None) -> dict:
     """Devuelve la analítica completa, historial de ventas y predicciones para un producto específico."""
     import frappe
 
@@ -177,7 +188,7 @@ def get_product_bi_analytics(item_code: str) -> dict:
     settings = frappe.get_single("Cima VE Settings")
     lead_days = int(getattr(settings, "china_lead_time_days", 45) or 45)
     safety_days = int(getattr(settings, "bi_safety_stock_days", 15) or 15)
-    window_days = int(getattr(settings, "bi_analysis_window_days", 90) or 90)
+    window_days = _resolve_window_days(settings, analysis_window_days)
 
     return build_product_analytics(
         item=item_payload,

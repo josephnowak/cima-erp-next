@@ -13,6 +13,7 @@ class CimaBiPage {
 		this.wrapper = $(wrapper);
 		this.allItems = [];
 		this.selectedItemCode = null;
+		this.analysisWindowDays = null;
 		this.renderShell();
 		this.bindEvents();
 		this.loadBi();
@@ -45,6 +46,15 @@ class CimaBiPage {
 					<div class="d-flex flex-wrap align-items-center" style="gap: 10px;">
 						<input type="text" id="bi-product-search" class="form-control" style="flex: 1; min-width: 240px;"
 							placeholder="Buscar por nombre, código o categoría (ej: Cargador, Audífono, Cable)..." />
+						<select id="bi-window-select" class="form-control" style="width: auto; min-width: 185px;" title="Período de datos para agregados y estimaciones">
+							<option value="7">Ventana: 7 días (7D)</option>
+							<option value="15">Ventana: 15 días (15D)</option>
+							<option value="30">Ventana: 30 días (30D)</option>
+							<option value="60">Ventana: 60 días (60D)</option>
+							<option value="90" selected>Ventana: 90 días (90D)</option>
+							<option value="180">Ventana: 180 días (180D)</option>
+							<option value="365">Ventana: 365 días (1A)</option>
+						</select>
 						<button type="button" class="btn btn-default" id="bi-product-clear">Limpiar</button>
 					</div>
 					<div id="bi-product-results"></div>
@@ -93,6 +103,14 @@ class CimaBiPage {
 		root.on("input", "#bi-product-search", () => {
 			this.renderSearchResults();
 		});
+		root.on("change", "#bi-window-select", (e) => {
+			const days = Number($(e.currentTarget).val()) || 90;
+			this.analysisWindowDays = days;
+			this.loadBi();
+			if (this.selectedItemCode) {
+				this.loadProductAnalytics(this.selectedItemCode);
+			}
+		});
 		root.on("click", "#bi-product-clear", () => {
 			root.find("#bi-product-search").val("");
 			this.selectedItemCode = null;
@@ -125,8 +143,13 @@ class CimaBiPage {
 	}
 
 	loadBi() {
+		const args = {};
+		if (this.analysisWindowDays) {
+			args.analysis_window_days = this.analysisWindowDays;
+		}
 		frappe.call({
 			method: "cima_ve.api.bi.get_bi_dashboard",
+			args,
 			callback: (r) => {
 				if (!r.message) return;
 				this.renderBi(r.message);
@@ -138,6 +161,16 @@ class CimaBiPage {
 		this.allItems = data.all_items || [];
 		const k = data.kpis;
 		const cfg = data.config;
+		if (cfg && cfg.analysis_window_days) {
+			this.analysisWindowDays = Number(cfg.analysis_window_days);
+			const sel = this.wrapper.find("#bi-window-select");
+			if (sel.length) {
+				if (!sel.find(`option[value="${this.analysisWindowDays}"]`).length) {
+					sel.append(`<option value="${this.analysisWindowDays}">Ventana: ${this.analysisWindowDays} días (${this.analysisWindowDays}D)</option>`);
+				}
+				sel.val(String(this.analysisWindowDays));
+			}
+		}
 		this.wrapper.find("#bi-lead-badge").text(`Lead time China: ${cfg.china_lead_time_days} días · Seguridad: ${cfg.safety_stock_days}d`);
 		this.wrapper.find("#bi-kpis").html(`
 			<div class="cima-kpi-card danger">
@@ -255,8 +288,7 @@ class CimaBiPage {
 
 	loadProductAnalytics(itemCode) {
 		this.selectedItemCode = itemCode;
-		this.wrapper.find(".cima-bi-search-item").removeClass("active");
-		this.wrapper.find(`.cima-bi-search-item[data-bi-item="${CSS.escape(itemCode)}"]`).addClass("active");
+		this.wrapper.find("#bi-product-results").empty();
 
 		const detailBox = this.wrapper.find("#bi-product-detail");
 		detailBox.html(`<div class="cima-bi-detail-box text-muted">Cargando analítica completa de <code>${frappe.utils.escape_html(itemCode)}</code>...</div>`);
@@ -266,9 +298,14 @@ class CimaBiPage {
 			el.scrollIntoView({ behavior: "smooth", block: "nearest" });
 		}
 
+		const args = { item_code: itemCode };
+		if (this.analysisWindowDays) {
+			args.analysis_window_days = this.analysisWindowDays;
+		}
+
 		frappe.call({
 			method: "cima_ve.api.bi.get_product_bi_analytics",
-			args: { item_code: itemCode },
+			args,
 			callback: (r) => {
 				if (!r.message) return;
 				this.renderProductAnalytics(r.message);
@@ -343,18 +380,18 @@ class CimaBiPage {
 						</div>
 					</div>
 					<div class="cima-kpi-card emerald">
-						<div class="cima-kpi-label">Vendido (Histórico / ${cfg.analysis_window_days}d)</div>
-						<div class="cima-kpi-value">${s.units_all_time} uds</div>
+						<div class="cima-kpi-label">Vendido (${cfg.analysis_window_days}d)</div>
+						<div class="cima-kpi-value">${s.units_window} uds</div>
 						<div class="cima-kpi-sub">
-							Total: $${Number(s.revenue_all_time || 0).toFixed(2)} (${s.invoices_all_time} fact.)<br/>
-							Últimos ${cfg.analysis_window_days}d: ${s.units_window} uds ($${Number(s.revenue_window || 0).toFixed(2)})
+							Total ${cfg.analysis_window_days}d: $${Number(s.revenue_window || 0).toFixed(2)} (${s.invoices_window} fact.)<br/>
+							Histórico total: ${s.units_all_time} uds ($${Number(s.revenue_all_time || 0).toFixed(2)})
 						</div>
 					</div>
 					<div class="cima-kpi-card">
 						<div class="cima-kpi-label">Velocidad de Venta</div>
 						<div class="cima-kpi-value">${Number(v.daily_velocity || 0).toFixed(2)} / día</div>
 						<div class="cima-kpi-sub">
-							7d: ${s.units_7d} uds · 30d: ${s.units_30d} uds<br/>
+							Base ${cfg.analysis_window_days}d · 7d: ${s.units_7d} uds · 30d: ${s.units_30d} uds<br/>
 							Ritmo mensual: ${v.monthly_velocity} uds/mes
 						</div>
 					</div>
@@ -378,7 +415,7 @@ class CimaBiPage {
 
 				<div class="row mb-3">
 					<div class="col-md-6 mb-3">
-						<h5 class="font-weight-bold mb-2">Predicción de Ventas Esperadas</h5>
+						<h5 class="font-weight-bold mb-2">Predicción de Ventas Esperadas <small class="text-muted">(base ${cfg.analysis_window_days}d)</small></h5>
 						<div class="table-responsive">
 							<table class="table table-sm table-bordered">
 								<thead>

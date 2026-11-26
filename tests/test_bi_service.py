@@ -1,7 +1,7 @@
 import unittest
 from datetime import date
 
-from cima_ve.api.bi import get_product_bi_analytics
+from cima_ve.api.bi import _resolve_window_days, get_product_bi_analytics
 from cima_ve.services.bi_service import (
     analyze_inventory_intelligence,
     build_product_analytics,
@@ -161,6 +161,44 @@ class BiServiceTests(unittest.TestCase):
         self.assertEqual(res["predictions"]["recommended_order_qty"], 0)
         self.assertEqual(res["velocity_and_trend"]["trend_direction"], "stable")
         self.assertEqual(len(res["monthly_series"]), 6)
+
+    def test_build_product_analytics_custom_window_30d_and_resolve_window_days(self) -> None:
+        class DummySettings:
+            bi_analysis_window_days = 90
+
+        self.assertEqual(_resolve_window_days(DummySettings(), None), 90)
+        self.assertEqual(_resolve_window_days(DummySettings(), "30"), 30)
+        self.assertEqual(_resolve_window_days(DummySettings(), 15), 15)
+        self.assertEqual(_resolve_window_days(DummySettings(), "invalid"), 90)
+        self.assertEqual(_resolve_window_days(DummySettings(), 0), 90)
+
+        item = {"item_code": "ITEM-W", "item_name": "Producto Ventana", "stock_qty": 30, "valuation_rate": 5.0, "price": 15.0}
+        sales_entries = [
+            {"posting_date": "2026-11-15", "invoice_name": "INV-1", "qty": 30, "rate": 15.0, "amount": 450.0},
+            {"posting_date": "2026-09-25", "invoice_name": "INV-2", "qty": 60, "rate": 15.0, "amount": 900.0},
+        ]
+        res_30 = build_product_analytics(
+            item=item,
+            sales_entries=sales_entries,
+            analysis_window_days=30,
+            today=date(2026, 11, 20),
+        )
+        self.assertEqual(res_30["config"]["analysis_window_days"], 30)
+        self.assertEqual(res_30["sales_summary"]["units_window"], 30.0)
+        self.assertEqual(res_30["sales_summary"]["revenue_window"], 450.0)
+        self.assertEqual(res_30["velocity_and_trend"]["daily_velocity"], 1.0)
+        self.assertEqual(res_30["predictions"]["projected_demand_30d"], 30.0)
+
+        res_90 = build_product_analytics(
+            item=item,
+            sales_entries=sales_entries,
+            analysis_window_days=90,
+            today=date(2026, 11, 20),
+        )
+        self.assertEqual(res_90["config"]["analysis_window_days"], 90)
+        self.assertEqual(res_90["sales_summary"]["units_window"], 90.0)
+        self.assertEqual(res_90["sales_summary"]["revenue_window"], 1350.0)
+        self.assertEqual(res_90["velocity_and_trend"]["daily_velocity"], 1.0)
 
 
 if __name__ == "__main__":
